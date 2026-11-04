@@ -19,6 +19,8 @@ fleet screen <session> [n]    last n lines (default 40) of an agent's screen
 fleet watchdog start|stop|dry run the watchdog in tmux session <FLEET>-watchdog, or one dry check
 fleet log [n]                 last n lines of watchdog.log
 fleet monitor-cmd             print the Monitor command for the supervisor session
+fleet handoff [name]          print a supervisor handoff skeleton with live fleet data,
+                              or write it to HANDOFF-<name>.md (never overwrites)
 EOF
 }
 
@@ -119,6 +121,57 @@ exit "$fail"
 EOF
   } | rx_helpers; }
 
+# Watchdog log filter: actionable lines always, routine lines only when an agent's state changes.
+MONITOR_AWK='
+/nudge|REPLACED|STARTED|DENIED|dialog|DRY|missing|LOWDISK|CTXROTATE|end time|state=dead|state=stalled|watchdog start|Connection|closed|error|Timeout|not responding/ { print; fflush(); next }
+/disk avail/ { next }
+{ s=$2; st=$3; if (last[s] != st) { last[s]=st; print; fflush() } }'
+
+monitor_cmd() { local tailcmd src
+  tailcmd="tail -n0 -F $FLEET_DIR/watchdog.log"
+  if [ -z "${REMOTE_SSH:-}" ]; then src="$tailcmd"
+  elif [ -n "${REMOTE_USER:-}" ]; then src="$(remote_cmd_prefix) 'su - $REMOTE_USER -c \"$tailcmd\"'"
+  else src="$(remote_cmd_prefix) '$tailcmd'"; fi
+  printf "%s 2>&1 | awk '%s'\n" "$src" "$MONITOR_AWK"; }
+
+# Handoff skeleton (references/handoff.md) filled with live data from the host.
+handoff_md() { local t
+  printf '# Supervisor handoff %s\n\nGenerated %s by fleet handoff. Fill in every empty section before you hand over. No secrets.\n\n' \
+    "${1:-}" "$(date -u +%FT%TZ)"
+  echo "## 1. Where things run"; echo
+  echo "- Fleet: \`$FLEET\`, fleet dir on the host: \`$FLEET_DIR\`, local fleet dir: \`$LOCAL_DIR\`"
+  echo "- Host access: REMOTE_SSH \`${REMOTE_SSH:-(local)}\`, REMOTE_USER \`${REMOTE_USER:-(none)}\`"
+  echo "- AGENT_CWD \`${AGENT_CWD:-}\`, CLAUDE_CONFIG_DIR \`${CLAUDE_CONFIG_DIR:-(default)}\`, CLAUDE_ARGS \`${CLAUDE_ARGS:-}\`"
+  echo "- END_AT \`${END_AT:-}\`, CTX_MAX \`${CTX_MAX:-85}\`, DISK_PATH \`${DISK_PATH:-/}\`, DISK_MIN_G \`${DISK_MIN_G:-40}\`"
+  echo; echo "Agents (live, checked $(date -u +%FT%TZ)):"; echo
+  cat <<'EOF' | rx_helpers
+for s in "${SESSIONS[@]}"; do
+  if tmux has-session -t "$s" 2>/dev/null; then pid=$(claude_pid "$s"); ctx=$(ctx_pct "$(screen "$s")"); tm=present
+  else pid=; ctx=; tm=missing; fi
+  last=$(rg -F " $s " "$LOG" 2>/dev/null | tail -1)
+  printf -- '- `%s` "%s": tmux session %s, claude pid %s, context %s%%\n  - last watchdog line: `%s`\n' \
+    "$s" "${NAME[$s]}" "$tm" "${pid:-none}" "${ctx:-?}" "${last:-none}"
+done
+EOF
+  echo; echo "Worktree or clone per agent: (fill in)"
+  echo; echo "## 2. Watchdog"; echo
+  { printf 'cd %q || exit 1\nMONITOR_AWK=%q\nW=%q\n' "$FLEET_DIR" "$MONITOR_AWK" "$FLEET-watchdog"
+    cat <<'EOF'
+if tmux has-session -t "$W" 2>/dev/null; then echo "- tmux session \`$W\`: running"; else echo "- tmux session \`$W\`: NOT running"; fi
+echo "- Restart after a reboot: \`fleet watchdog start\`, then \`fleet start\`"
+echo; echo "Last 30 actionable watchdog log lines:"; echo; echo '```'
+awk "$MONITOR_AWK" watchdog.log 2>/dev/null | tail -n 30
+echo '```'
+EOF
+  } | rx
+  echo; echo "## 3. Monitor"; echo; echo '```'; monitor_cmd; echo '```'
+  echo; echo "## 4. Owner decisions"; echo
+  echo "(each decision with its time and the message files it went out in; mark agent decisions and supervisor suggestions as such)"
+  echo; echo "Message files on the host (UTC):"; echo
+  printf 'cd %q || exit 1\nTZ=UTC ls -l --time-style=+%%FT%%TZ msg-*.txt 2>/dev/null | awk '"'"'{print "- " $6 " " $7}'"'"'\n' "$FLEET_DIR" | rx || true
+  for t in "5. Verified state" "6. Pending" "7. Human steps" "8. Warnings" "9. Transcript"; do printf '\n## %s\n\n' "$t"; done
+  }
+
 cmd=${1:-}; shift || true
 case "$cmd" in
   init)
@@ -211,18 +264,14 @@ EOF
   log)
     load_conf; printf 'tail -n %q %q/watchdog.log\n' "${1:-30}" "$FLEET_DIR" | rx ;;
   monitor-cmd)
-    load_conf
-    tailcmd="tail -n0 -F $FLEET_DIR/watchdog.log"
-    if [ -z "${REMOTE_SSH:-}" ]; then src="$tailcmd"
-    elif [ -n "${REMOTE_USER:-}" ]; then src="$(remote_cmd_prefix) 'su - $REMOTE_USER -c \"$tailcmd\"'"
-    else src="$(remote_cmd_prefix) '$tailcmd'"; fi
-    cat <<EOF
-$src 2>&1 | awk '
-/nudge|REPLACED|STARTED|DENIED|dialog|DRY|missing|LOWDISK|CTXROTATE|end time|state=dead|state=stalled|watchdog start|Connection|closed|error|Timeout|not responding/ { print; fflush(); next }
-/disk avail/ { next }
-{ s=\$2; st=\$3; if (last[s] != st) { last[s]=st; print; fflush() } }'
-EOF
-    ;;
+    load_conf; monitor_cmd ;;
+  handoff)
+    load_conf; name=${1:-}
+    if [ -z "$name" ]; then handoff_md; exit 0; fi
+    case "$name" in */*|.*) echo "handoff name must be a plain word" >&2; exit 1 ;; esac
+    out=$LOCAL_DIR/HANDOFF-$name.md
+    [ -e "$out" ] && { echo "$out exists, not overwriting" >&2; exit 1; }
+    handoff_md "$name" > "$out.tmp" && mv "$out.tmp" "$out" && echo "wrote $out" ;;
   ""|-h|--help|help) usage ;;
   *) echo "unknown command: $cmd" >&2; usage; exit 1 ;;
 esac
