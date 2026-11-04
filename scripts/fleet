@@ -154,8 +154,10 @@ EOF2
   } | rx || rc=$?
   rm -rf "$tmp"; [ "$rc" = 0 ] || exit "$rc"; }
 
-# Script lines that write local file $2 to $1 in FLEET_DIR on the host.
-upload_msg() { printf 'cat > %q <<'"'"'FLEET_MSG_EOF'"'"'\n' "$1"; cat "$2"; printf '\nFLEET_MSG_EOF\n'; }
+# Script lines that write local file $2 to $1 in FLEET_DIR on the host. The
+# bytes go as base64, so no message text is ever read as shell. A base64 line
+# cannot equal the delimiter, which has an underscore.
+upload_msg() { printf 'base64 -d > %q <<'"'"'FLEET_B64_EOF'"'"' || exit 8\n' "$1"; base64 < "$2"; printf 'FLEET_B64_EOF\n'; }
 
 # Paste one message file into every agent. Keeps going past failures, prints
 # one line per agent, and fails when any agent did not get it.
