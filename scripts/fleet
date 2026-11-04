@@ -247,14 +247,31 @@ case "$cmd" in
     tmp=$(mktemp -d)
     { printf 'cd %q || exit 1\nset --\nfor f in' "$FLEET_DIR"; printf ' %q' "${names[@]}"
       printf '; do if [ -f "$f" ]; then set -- "$@" "$f"; else echo "not on the host: $f" >&2; fi; done\n[ $# -gt 0 ] || exit 3\ntar -cf - "$@"\n'; } | rx | tar -C "$tmp" -xf -
+    pulled=(); hashes=()
     for f in "${names[@]}"; do
       [ -f "$tmp/$f" ] || continue
+      pulled+=("$f"); hashes+=("$(sha256 < "$tmp/$f" | cut -d' ' -f1)")
       if [ -f "$LOCAL_DIR/$f" ] && ! cmp -s "$tmp/$f" "$LOCAL_DIR/$f"; then
         cp "$LOCAL_DIR/$f" "$LOCAL_DIR/$f.local-bak"; echo "pulled $f (previous local copy saved as $f.local-bak)"
       else echo "pulled $f"; fi
       mv "$tmp/$f" "$LOCAL_DIR/$f"
     done
-    rm -rf "$tmp" ;;
+    rm -rf "$tmp"
+    [ ${#pulled[@]} -gt 0 ] || exit 0
+    # The pulled copies become the sync baseline, but only where the host file
+    # still has the pulled content.
+    { printf 'cd %q || exit 4\nnames=(' "$FLEET_DIR"; printf ' %q' "${pulled[@]}"; printf ' )\nhashes=('
+      printf ' %q' "${hashes[@]}"; printf ' )\n%s\n' "$REMOTE_MERGE"
+      cat <<'EOF2'
+lines=; bad=0
+for i in "${!names[@]}"; do f=${names[$i]}; cur=$(sha256sum -- "$f" 2>/dev/null | cut -d' ' -f1)
+  if [ "$cur" = "${hashes[$i]}" ]; then lines+="${hashes[$i]}  $f"$'\n'
+  else echo "$f changed on the host during the pull, its sync baseline was not updated. Pull it again." >&2; bad=1; fi
+done
+[ -z "$lines" ] || printf '%s' "$lines" | merge_manifest || exit 5
+exit "$bad"
+EOF2
+    } | rx ;;
   start)
     load_conf
     { printf 'want=(%s)\n' "$*"
@@ -285,8 +302,16 @@ EOF
     last=$(rg -o '^(\d+)\.' -r '$1' "$a" | sort -n | tail -1) || last=
     rule="$(( ${last:-0} + 1 )). Decision from the owner ($(date -u +%FT%TZ), relayed by the supervisor): $text"
     [ -s "$a" ] && [ -n "$(tail -c1 "$a")" ] && echo >> "$a"
+    keep=$(mktemp); cp "$a" "$keep"
     printf '%s\n' "$rule" >> "$a"; echo "added to autonomy.txt: $rule"
-    do_sync 0 autonomy.txt
+    # Sync in a subshell so a refusal or failure comes back here and the local
+    # file can be restored instead of holding a rule the host never got.
+    set +e; (set -e; do_sync 0 autonomy.txt); rc=$?; set -e
+    if [ "$rc" != 0 ]; then
+      cp "$keep" "$a"; rm -f "$keep"
+      echo "decision NOT recorded: the sync failed (exit $rc), so the local autonomy.txt was restored to its previous content and nothing was broadcast" >&2
+      exit "$rc"; fi
+    rm -f "$keep"
     msg=$(mktemp); printf '%s\n' "$rule" > "$msg"
     rc=0; do_broadcast "$msg" || rc=$?
     rm -f "$msg"; exit "$rc" ;;
