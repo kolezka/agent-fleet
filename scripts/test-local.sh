@@ -108,8 +108,10 @@ if pane_has f7b GOT-ENTER; then pass "7 control: the GOT-ENTER probe sees a real
 # Without echo the pane shows the line once, like Claude Code's input line.
 session f7c "stty -echo; cat"
 new_fleet f7q 0 f7c; fleet sync
+# A quoted dialog line cannot be told apart from a real dialog after the paste, so it is refused.
 printf 'f7 quoting: Do you want to proceed?\n' > "$D/m.txt"; fleet send f7c "$D/m.txt"
-if [ "$RC" = 0 ]; then pass "7 a message that quotes the dialog text still delivers (exit $RC)"; else fail "7 a message that quotes the dialog text still delivers (exit $RC)"; show; fi
+if [ "$RC" = 8 ]; then pass "7 a message that quotes dialog text is refused (exit $RC)"; else fail "7 a message that quotes dialog text is refused (exit $RC, want 8)"; show; fi
+if pane_has f7c 'f7 quoting'; then fail "7 the refused quote message was pasted anyway"; else pass "7 the refused quote message was not pasted"; fi
 
 echo "failures: $FAILS"
 [ "$FAILS" = 0 ]
