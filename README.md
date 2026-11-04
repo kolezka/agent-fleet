@@ -8,6 +8,7 @@ It grew out of a 48 h run of four TV-platform agents (Apple TV, Android TV, Fire
 
 - `skills/agent-fleet/SKILL.md`: the supervisor workflow (setup, supervise, relay, verify, hand off, advise).
 - `scripts/fleet`: the CLI. It runs on the Mac or on the host, and reaches the host over ssh via `fleet.conf`.
+- `scripts/smoke-test.sh`: tests the CLI against a real host with a scratch fleet. It never starts claude and cleans up after itself.
 - `scripts/watchdog.sh`: runs on the agent host. Every 60 s it nudges idle agents, nudges and then replaces stalled ones, recreates missing sessions, denies permission dialogs, warns on low disk, rotates agents at `CTX_MAX`% context, and exits at `END_AT`.
 - `templates/`: `fleet.conf`, `autonomy.txt` (the standing rule and hard limits appended to every agent prompt), `idle-nudge.txt`, `ctx-handoff.txt`, `agent.example.txt`.
 
@@ -20,7 +21,12 @@ fleet sync && fleet watchdog dry
 fleet start && fleet watchdog start && fleet status
 fleet monitor-cmd      # arm this with the Monitor tool in the supervisor session
 fleet send agent-a msg.txt
+fleet broadcast msg.txt                        # one message to every agent
+fleet decide "Ship the tablet layout first"    # numbered rule in autonomy.txt, synced and broadcast
+fleet handoff sup-2                            # HANDOFF-sup-2.md draft with live fleet data
 ```
+
+`fleet sync` refuses when a file on the host was edited since the last sync (supervisors edit `autonomy.txt` there). Run `fleet pull <file>` to bring it back and merge, or `fleet sync --force` to overwrite it. A fleet last synced by version 0.1 has no sync manifest yet, so its first sync after the upgrade refuses for every host file that differs from the local copy.
 
 ## Requirements
 

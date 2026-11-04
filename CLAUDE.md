@@ -6,6 +6,7 @@ A Claude Code plugin for supervising a fleet of autonomous Claude Code agents. T
 
 - `scripts/fleet`: the CLI. It runs on the supervisor machine (macOS or Linux) and reaches the host through `rx` (bash script over stdin, optional `su - REMOTE_USER`).
 - `scripts/watchdog.sh`: runs on the agent host only (Linux: GNU `date -d`, `/proc`, `ps --ppid`, `md5sum`). When sourced it loads the helpers and returns before the loop. `fleet send`, `fleet start` and `fleet status` depend on that.
+- `scripts/smoke-test.sh`: the smoke test against a real host (see below).
 - `templates/`: files copied by `fleet init`. `fleet.conf` is sourced by bash on both sides, so it must stay valid bash.
 - `skills/agent-fleet/`: the skill and its references. Keep SKILL.md short and put details in `references/`.
 
@@ -22,18 +23,19 @@ A Claude Code plugin for supervising a fleet of autonomous Claude Code agents. T
 ## Checks before a commit
 
 ```sh
-bash -n scripts/fleet && bash -n scripts/watchdog.sh
-shellcheck -S warning scripts/fleet scripts/watchdog.sh
+bash -n scripts/fleet && bash -n scripts/watchdog.sh && bash -n scripts/smoke-test.sh
+shellcheck -S warning scripts/fleet scripts/watchdog.sh scripts/smoke-test.sh
 jq . .claude-plugin/*.json >/dev/null
 rg -n '\x{2013}|\x{2014}' .   # must find nothing: no en or em dashes anywhere
 ```
 
-A behaviour change also needs a smoke test on a real Linux host with a scratch fleet. Use its own `FLEET_DIR` and session names, and remove it afterwards:
+A behaviour change also needs a smoke test on a real Linux host with a scratch fleet:
 
-1. `fleet init /tmp/fleet-test`, point `fleet.conf` at the host, one agent row.
-2. `fleet sync` and `fleet watchdog dry`. Both must exit 0 with no bash errors.
-3. `fleet send` to a plain tmux session (`tmux new-session -d -s <name> cat`) must deliver. With `Do you want to proceed?` on screen it must exit 3.
-4. Kill the scratch session and delete the scratch dirs on the host.
+```sh
+scripts/smoke-test.sh "<REMOTE_SSH>" [REMOTE_USER] [HOST_BASE_DIR]
+```
+
+It creates a `fleetsmoke-<random>` fleet with its own `FLEET_DIR` and tmux sessions running `cat`, checks sync, watchdog dry, send (including exit 3, 2 and 6), the sync guard with pull and `--force`, broadcast, decide and handoff, and removes its sessions and dirs on exit. It must exit 0. It never starts claude. Add a check there when you add a command.
 
 Never test against a running fleet's sessions or `FLEET_DIR`. A live `fleet start` launches a real agent with `CLAUDE_ARGS`, so only run it when the owner agrees.
 

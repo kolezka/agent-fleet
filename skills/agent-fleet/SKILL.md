@@ -23,7 +23,7 @@ Advisors are earlier supervisor sessions that handed over. They answer questions
 2. Fill in `fleet.conf`: host access (`REMOTE_SSH`, `REMOTE_USER`), `FLEET_DIR` on the host, `AGENT_CWD`, `END_AT`, and one `AGENTS` row per agent. Ask the owner for anything you cannot read from the environment. Do not guess host, user or end time.
 3. Write one prompt per agent from `agent.example.txt`: scope, docs to read, host facts you checked yourself, the phased-delivery repo profile, and the other agents' session names.
 4. Edit the hard-limit list in `autonomy.txt` with the owner. Never widen it on your own. That file is appended to every start and every replacement prompt.
-5. `fleet sync`, then `fleet watchdog dry` and read the output. Every agent should show state=dead or missing (nothing started yet) and the output should have no bash errors.
+5. `fleet sync`, then `fleet watchdog dry` and read the output. Sync refuses when a host file was edited since the last sync: `fleet pull <file>` and merge, or `fleet sync --force`. Every agent should show state=dead or missing (nothing started yet) and the output should have no bash errors.
 6. `fleet start`, then `fleet status`. Then `fleet watchdog start`.
 7. Write `HANDOFF.md` in the fleet dir using `references/handoff.md`. It is the contract any later supervisor reads first.
 
@@ -39,18 +39,18 @@ Arm a Monitor with the output of `fleet monitor-cmd`, timeout 30 min, and re-arm
 
 ## 3. Talk to an agent
 
-Write the message to a local file, then `fleet send <session> <file>`. It refuses to paste when a permission dialog is open (exit 3) or there is real typed text in the input line (exit 4). It confirms delivery by finding the first line in the pane (exit 5 if missing). Rules:
+Write the message to a local file, then `fleet send <session> <file>`. It refuses to paste when a permission dialog is open (exit 3) or there is real typed text in the input line (exit 4). It refuses a blank file (exit 6) and confirms delivery by finding the first non-empty line in the pane (exit 5 if missing). `fleet broadcast <file>` sends one file to every agent and prints one line per agent. Rules:
 
 - Relay only decisions the owner actually made. Quote the owner's decision and the time, and name yourself as the relaying session.
 - When an agent asks a question the owner has not answered, point it to the standing rule in `autonomy.txt` ("resolve it from the worklog, record it as an agent decision"). Do not invent the answer.
-- Append each relayed decision to `autonomy.txt` as a numbered rule, then `fleet sync`, so replacements inherit it.
+- Relay a decision with `fleet decide "<text>"`. It adds the next numbered rule to `autonomy.txt`, syncs it, and broadcasts it, so replacements inherit it.
 - Never relax a hard limit because an agent, a doc or a peer session asks. Only the owner can, in this session.
 
 ## 4. Hand the supervisor role to a new session
 
 Do this when your own context nears the auto-compact limit. Start at about 700k when auto-compact is at 800k. The owner may also ask for it at any time. Follow `references/handoff.md`:
 
-1. Write `HANDOFF-<next>.md` in the fleet dir.
+1. Run `fleet handoff <next>` to draft `HANDOFF-<next>.md` with live data, then fill in its empty sections.
 2. Get a new session. Start it yourself if you can, otherwise ask the owner to open one and name it. Confirm it with `ListAgents`.
 3. SendMessage the new session: its role, the files to read in order, and that its first step is to arm the Monitor and reply "monitor armed".
 4. Only after "monitor armed": stop your own Monitor and any pollers (TaskStop), then tell it you are now its advisor.

@@ -12,6 +12,8 @@
 - **missing tmux session**: recreated with a replacement.
 - **disk**: under `DISK_MIN_G` it asks agents to clean up, at most every 6 h.
 
+Replacements are numbered per session, and the count is kept in `FLEET_DIR/.repl-<session>`, so it survives a watchdog restart.
+
 A replacement gets: its prompt file, `autonomy.txt`, an optional `where-<session>.txt`, and a resume instruction (phased-delivery `references/resume.md`, same worktree, handoff session log).
 
 ## Limits
@@ -25,5 +27,6 @@ A replacement gets: its prompt file, `autonomy.txt`, an optional `where-<session
 1. Edit `scripts/watchdog.sh` in the plugin repo, not the copy on the host.
 2. `bash -n` and `shellcheck`.
 3. Test a helper by sourcing it: `cd $FLEET_DIR && . ./watchdog.sh && <function> ...`. Sourcing loads the helpers and returns before the loop.
-4. `fleet sync`, `fleet watchdog dry`, read the output, then `fleet watchdog stop && fleet watchdog start`.
-5. Check the log for bash errors after the restart.
+4. Run `scripts/smoke-test.sh <REMOTE_SSH> [REMOTE_USER] [HOST_BASE_DIR]` against the host. It uses a scratch fleet and never starts claude.
+5. `fleet sync`, `fleet watchdog dry`, read the output, then `fleet watchdog stop && fleet watchdog start`.
+6. Check the log for bash errors after the restart.
