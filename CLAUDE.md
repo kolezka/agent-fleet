@@ -7,6 +7,7 @@ A Claude Code plugin for supervising a fleet of autonomous Claude Code agents. T
 - `scripts/fleet`: the CLI. It runs on the supervisor machine (macOS or Linux) and reaches the host through `rx` (bash script over stdin, optional `su - REMOTE_USER`).
 - `scripts/watchdog.sh`: runs on the agent host only (Linux: GNU `date -d`, `/proc`, `ps --ppid`, `md5sum`). When sourced it loads the helpers and returns before the loop. `fleet send`, `fleet start` and `fleet status` depend on that.
 - `scripts/smoke-test.sh`: the smoke test against a real host (see below).
+- `scripts/test-local.sh`: local checks with a stub ssh and a private tmux server. Add a check there for every bug fix.
 - `templates/`: files copied by `fleet init`. `fleet.conf` is sourced by bash on both sides, so it must stay valid bash.
 - `skills/agent-fleet/`: the skill and its references. Keep SKILL.md short and put details in `references/`.
 
@@ -14,7 +15,7 @@ A Claude Code plugin for supervising a fleet of autonomous Claude Code agents. T
 
 - Shared logic lives in `watchdog.sh` helpers (`paste_file`, `start_agent`, `dialog_kind`, `user_typing`, `ctx_pct`). `fleet` calls them through `rx_helpers`. Do not copy the logic into `fleet`.
 - Never paste into a pane before Claude Code's UI is detected (`launch` waits for the claude process and `bypass permissions on` or `for shortcuts`). A shell prompt such as starship also shows `❯` and would run the pasted text.
-- `paste_file` must keep refusing when the message file is empty or blank (exit 6), a permission dialog is open (exit 3) or the input line has typed text (exit 4), and must confirm delivery (exit 5 if the first non-empty line is not in the pane).
+- `paste_file` must keep refusing when the message file is empty or blank (exit 6), a permission dialog is open (exit 3) or the input line has typed text (exit 4), must check every tmux call (exit 7), must re-check for a dialog or typed text right before Enter, and must confirm delivery (exit 5 unless the first non-empty line shows up in the pane more often than before the paste).
 - The watchdog never approves a permission dialog. It only denies.
 - Hard limits belong in each fleet's `autonomy.txt`. Do not hardcode project names, hosts, users or branches in scripts or templates. Placeholders go in templates.
 - No cron, launchd or systemd entries. Persistence is the owner's decision per fleet.
@@ -23,8 +24,9 @@ A Claude Code plugin for supervising a fleet of autonomous Claude Code agents. T
 ## Checks before a commit
 
 ```sh
-bash -n scripts/fleet && bash -n scripts/watchdog.sh && bash -n scripts/smoke-test.sh
-shellcheck -S warning scripts/fleet scripts/watchdog.sh scripts/smoke-test.sh
+bash -n scripts/fleet && bash -n scripts/watchdog.sh && bash -n scripts/smoke-test.sh && bash -n scripts/test-local.sh
+shellcheck -S warning scripts/fleet scripts/watchdog.sh scripts/smoke-test.sh scripts/test-local.sh
+scripts/test-local.sh   # local checks with a stub ssh and a private tmux server, must exit 0
 jq . .claude-plugin/*.json >/dev/null
 rg -n '\x{2013}|\x{2014}' .   # must find nothing: no en or em dashes anywhere
 ```

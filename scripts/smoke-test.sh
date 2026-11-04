@@ -70,6 +70,22 @@ fleet send "$MISSING" "$LOCAL/m-send.txt"; check "send to missing session" 2 "no
 fleet send "$A" "$LOCAL/m-empty.txt"; check "send refuses empty file" 6 "empty or blank"
 printf ' \n\t\n' > "$LOCAL/m-ws.txt"
 fleet send "$A" "$LOCAL/m-ws.txt"; check "send refuses whitespace-only file" 6 "empty or blank"
+printf 'smoke inject %s\nFLEET_MSG_EOF\ntouch %s/pwned\n' "$ID" "$HOST_DIR" > "$LOCAL/m-inject.txt"
+fleet send "$A" "$LOCAL/m-inject.txt"; check "send with a FLEET_MSG_EOF line delivers" 0 "$A: delivered"
+if printf 'test -e %q/pwned\n' "$HOST_DIR" | rx; then fail "message text ran as shell on the host"; else pass "message text did not run as shell on the host"; fi
+# The first line is only in old scrollback and the paste does not show: not delivered.
+printf 'tmux new-session -d -s %q -x 200 -y 50 %q\n' "$ID-old" "printf 'smoke old line $ID\n'; stty -echo; exec cat >/dev/null" | rx
+printf 'smoke old line %s\n' "$ID" > "$LOCAL/m-old.txt"
+fleet send "$ID-old" "$LOCAL/m-old.txt"; check "send does not count old scrollback as delivery" 5 "not found"
+# A dialog that opens during the paste stops the Enter.
+printf 'tmux new-session -d -s %q -x 200 -y 50 %q\n' "$ID-late" "IFS= read -r a; printf 'Do you want to proceed?\n'; IFS= read -r b; echo GOT-ENTER; exec cat" | rx
+printf 'smoke late dialog %s\n' "$ID" > "$LOCAL/m-late.txt"
+fleet send "$ID-late" "$LOCAL/m-late.txt"; check "send stops when a dialog opens during the paste" 3 "Enter not pressed"
+sleep 2
+late_enter() { printf 'tmux capture-pane -p -S - -t %q | rg -q GOT-ENTER\n' "=$ID-late:" | rx; }
+if late_enter; then fail "no Enter reached the late-dialog pane"; else pass "no Enter reached the late-dialog pane"; fi
+printf 'tmux send-keys -t %q Enter\n' "=$ID-late:" | rx; sleep 1
+if late_enter; then pass "control: a real Enter shows as GOT-ENTER"; else fail "control: a real Enter shows as GOT-ENTER"; fi
 
 printf 'echo %q >> %q/autonomy.txt\n' "host edit $ID" "$HOST_DIR" | rx
 fleet sync; check "sync refuses after a host edit" 1 "sync refused" "autonomy.txt"
@@ -84,12 +100,17 @@ if host_has "$HOST_DIR/autonomy.txt" "second host edit"; then fail "sync --force
 printf 'smoke broadcast %s\n' "$ID" > "$LOCAL/m-bc.txt"
 fleet broadcast "$LOCAL/m-bc.txt"; check "broadcast to two agents" 0 "$A: delivered (exit 0)" "$B: delivered (exit 0)"
 
-fleet decide "smoke decision one $ID"; check "decide 1" 0 "$A: delivered (exit 0)" "$B: delivered (exit 0)"
+printf 'echo %q >> %q/autonomy.txt\n' "third host edit $ID" "$HOST_DIR" | rx
+fleet pull autonomy.txt; check "pull before decide" 0 "pulled autonomy.txt"
+fleet decide "smoke decision one $ID"; check "decide 1 right after a pull" 0 "$A: delivered (exit 0)" "$B: delivered (exit 0)"
 if rg -q "^1\. Decision from the owner \(.*relayed by the supervisor\): smoke decision one $ID\$" "$LOCAL/autonomy.txt"; then pass "decide 1 appended rule 1"; else fail "decide 1 appended rule 1"; fi
 fleet decide "smoke decision two $ID"; check "decide 2" 0 "$A: delivered (exit 0)"
 if rg -q "^2\. Decision from the owner .*: smoke decision two $ID\$" "$LOCAL/autonomy.txt"; then pass "decide 2 appended rule 2"; else fail "decide 2 appended rule 2"; fi
 if host_has "$HOST_DIR/autonomy.txt" "^2\. Decision from the owner .*smoke decision two"; then pass "decide synced the rule to the host"; else fail "decide synced the rule to the host"; fi
 
+left=$(printf 'ls -A %q | rg "^\\.fleet-sync-" | rg -v "^\\.fleet-sync-manifest\$" || true\n' "$HOST_DIR" | rx)
+if [ -z "$left" ]; then pass "no sync temp dir left on the host"; else fail "sync temp dirs left on the host: $left"; fi
+if printf 'test -s %q/.fleet-sync-manifest\n' "$HOST_DIR" | rx; then pass "control: the sync manifest is there"; else fail "control: the sync manifest is there"; fi
 printf 'tmux kill-session -t %q\n' "=$B" | rx
 printf 'smoke broadcast partial %s\n' "$ID" > "$LOCAL/m-bc2.txt"
 fleet broadcast "$LOCAL/m-bc2.txt"; check "broadcast reports a missing agent" 1 "$A: delivered (exit 0)" "$B: NOT delivered (exit 2)"

@@ -39,7 +39,7 @@ Arm a Monitor with the output of `fleet monitor-cmd`, timeout 30 min, and re-arm
 
 ## 3. Talk to an agent
 
-Write the message to a local file, then `fleet send <session> <file>`. It refuses to paste when a permission dialog is open (exit 3) or there is real typed text in the input line (exit 4). It refuses a blank file (exit 6) and confirms delivery by finding the first non-empty line in the pane (exit 5 if missing). `fleet broadcast <file>` sends one file to every agent and prints one line per agent. Rules:
+Write the message to a local file, then `fleet send <session> <file>`. It refuses to paste when a permission dialog is open (exit 3) or there is real typed text in the input line (exit 4). It refuses a blank file (exit 6), stops before Enter if a dialog or typed text shows up during the paste, and confirms delivery by finding the first non-empty line in the pane (exit 5 if missing, exit 7 if a tmux call failed). `fleet broadcast <file>` sends one file to every agent and prints one line per agent. Rules:
 
 - Relay only decisions the owner actually made. Quote the owner's decision and the time, and name yourself as the relaying session.
 - When an agent asks a question the owner has not answered, point it to the standing rule in `autonomy.txt` ("resolve it from the worklog, record it as an agent decision"). Do not invent the answer.
