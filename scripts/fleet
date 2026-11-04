@@ -97,8 +97,19 @@ refuse_conflicts() {
 # Host-side shell function: merge "sha256  name" lines from stdin into the manifest.
 REMOTE_MERGE='merge_manifest() { { cat .fleet-sync-manifest 2>/dev/null; cat; } | awk '"'"'{ if (!($2 in h)) o[++n]=$2; h[$2]=$1 } END { for (i=1;i<=n;i++) print h[o[i]] "  " o[i] }'"'"' > .fleet-sync-manifest.tmp && mv .fleet-sync-manifest.tmp .fleet-sync-manifest; }'
 
+# Synced and pulled file names must be plain: the manifest and the host scripts
+# rely on names without spaces, quotes or backslashes.
+check_names() { local f bad=()
+  for f in "$@"; do [[ "$f" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || bad+=("$f"); done
+  [ ${#bad[@]} = 0 ] && return 0
+  echo "refused, nothing copied: file names may only use letters, digits, '.', '_' and '-' (and not start with '.' or '-'):" >&2
+  printf '  %q\n' "${bad[@]}" >&2
+  echo "Rename or move these files out of the fleet dir." >&2
+  exit 1; }
+
 # do_sync <force 0|1> <file...>: copy files to FLEET_DIR, refusing to drop host edits unless forced.
 do_sync() { local force=$1 tmp; shift
+  check_names "$@"
   if same_dir; then
     [[ " $* " == *" watchdog.sh "* ]] && cp "$PLUGIN_DIR/scripts/watchdog.sh" "$LOCAL_DIR/watchdog.sh"
     echo "FLEET_DIR is the local fleet dir, nothing else to copy"; return 0
@@ -229,8 +240,9 @@ case "$cmd" in
     load_conf
     same_dir && { echo "FLEET_DIR is the local fleet dir, nothing to pull"; exit 0; }
     if [ $# -gt 0 ]; then names=("$@"); else mapfile -t names < <(sync_files); fi
+    check_names "${names[@]}"
     for n in "${names[@]}"; do
-      case "$n" in */*|.*|watchdog.sh) echo "cannot pull $n: give a plain file name from FLEET_DIR (watchdog.sh comes from the plugin)" >&2; exit 1 ;; esac
+      [ "$n" != watchdog.sh ] || { echo "cannot pull watchdog.sh: it comes from the plugin" >&2; exit 1; }
     done
     tmp=$(mktemp -d)
     { printf 'cd %q || exit 1\nset --\nfor f in' "$FLEET_DIR"; printf ' %q' "${names[@]}"
