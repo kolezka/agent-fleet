@@ -11,6 +11,7 @@ fleet sync [--force]          copy fleet.conf, *.txt and watchdog.sh to FLEET_DI
 fleet pull [file...]          copy host files back into the local fleet dir (default: the synced files)
 fleet start [session...]      start agents that are not running (all when none named)
 fleet send <session> <file>   paste a message file into an agent, refuse on dialog or typed input
+fleet broadcast <file>        send one message file to every agent, one result line per agent
 fleet status                  tmux sessions, last watchdog state per agent, context %
 fleet screen <session> [n]    last n lines (default 40) of an agent's screen
 fleet watchdog start|stop|dry run the watchdog in tmux session <FLEET>-watchdog, or one dry check
@@ -98,6 +99,24 @@ echo "synced: $(ls | tr "\n" " ")"
 EOF
   } | rx; }
 
+# Script lines that write local file $2 to $1 in FLEET_DIR on the host.
+upload_msg() { printf 'cat > %q <<'"'"'FLEET_MSG_EOF'"'"'\n' "$1"; cat "$2"; printf '\nFLEET_MSG_EOF\n'; }
+
+# Paste one message file into every agent. Keeps going past failures, prints
+# one line per agent, and fails when any agent did not get it.
+do_broadcast() { local f=$1 name row sessions=()
+  for row in "${AGENTS[@]}"; do sessions+=("${row%%|*}"); done
+  name="msg-$(date -u +%Y%m%dT%H%M%SZ)-broadcast.txt"
+  { upload_msg "$name" "$f"; printf 'MSG=%q\nfail=0\nfor s in' "$name"; printf ' %q' "${sessions[@]}"; printf '; do\n'
+    cat <<'EOF'
+  out=$(paste_file "$s" "$MSG" 2>&1); rc=$?
+  if [ "$rc" = 0 ]; then r=delivered; else r="NOT delivered"; fail=1; fi
+  printf '%s: %s (exit %s): %s\n' "$s" "$r" "$rc" "$out"
+done
+exit "$fail"
+EOF
+  } | rx_helpers; }
+
 cmd=${1:-}; shift || true
 case "$cmd" in
   init)
@@ -145,8 +164,11 @@ EOF
     load_conf; s=${1:?usage: fleet send <session> <file>}; f=${2:?usage: fleet send <session> <file>}
     [ -f "$f" ] || { echo "no file $f" >&2; exit 1; }
     name="msg-$(date -u +%Y%m%dT%H%M%SZ)-$s.txt"
-    { printf 'cat > %q <<'"'"'FLEET_MSG_EOF'"'"'\n' "$name"; cat "$f"; printf '\nFLEET_MSG_EOF\n'
-      printf 'paste_file %q %q\n' "$s" "$name"; } | rx_helpers ;;
+    { upload_msg "$name" "$f"; printf 'paste_file %q %q\n' "$s" "$name"; } | rx_helpers ;;
+  broadcast)
+    load_conf; f=${1:?usage: fleet broadcast <file>}
+    [ -f "$f" ] || { echo "no file $f" >&2; exit 1; }
+    do_broadcast "$f" ;;
   status)
     load_conf
     cat <<'EOF' | rx_helpers
