@@ -6,14 +6,21 @@ PLUGIN_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 usage() { cat <<'EOF'
 fleet init <dir>              create a fleet dir with fleet.conf and prompt templates
-fleet sync                    copy fleet.conf, *.txt and watchdog.sh to FLEET_DIR on the host
+fleet sync [--force]          copy fleet.conf, *.txt and watchdog.sh to FLEET_DIR on the host;
+                              refuses when a host file was edited since the last sync (--force overwrites)
+fleet pull [file...]          copy host files back into the local fleet dir (default: the synced files)
 fleet start [session...]      start agents that are not running (all when none named)
 fleet send <session> <file>   paste a message file into an agent, refuse on dialog or typed input
+fleet broadcast <file>        send one message file to every agent, one result line per agent
+fleet decide "<text>"         add an owner decision as the next numbered rule in autonomy.txt,
+                              sync autonomy.txt and broadcast the rule to every agent
 fleet status                  tmux sessions, last watchdog state per agent, context %
 fleet screen <session> [n]    last n lines (default 40) of an agent's screen
 fleet watchdog start|stop|dry run the watchdog in tmux session <FLEET>-watchdog, or one dry check
 fleet log [n]                 last n lines of watchdog.log
 fleet monitor-cmd             print the Monitor command for the supervisor session
+fleet handoff [name]          print a supervisor handoff skeleton with live fleet data,
+                              or write it to HANDOFF-<name>.md (never overwrites)
 EOF
 }
 
@@ -41,6 +48,183 @@ remote_cmd_prefix() { # for the Monitor command: how to reach the host
   else printf '%s -o ServerAliveInterval=30 -o ServerAliveCountMax=6' "$REMOTE_SSH"; fi
 }
 
+same_dir() { [ -z "${REMOTE_SSH:-}" ] && [ "$(cd "$FLEET_DIR" 2>/dev/null && pwd)" = "$LOCAL_DIR" ]; }
+sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } # stdin
+# Files a full sync writes besides watchdog.sh: fleet.conf and *.txt, not the generated start-/replace- prompts.
+sync_files() { echo fleet.conf; (cd "$LOCAL_DIR" && ls ./*.txt 2>/dev/null | sed 's|^\./||' | rg -v '^(start|replace)-') || true; }
+src_of() { if [ "$1" = watchdog.sh ]; then echo "$PLUGIN_DIR/scripts/watchdog.sh"; else echo "$LOCAL_DIR/$1"; fi; }
+
+# Measure the host copies: HOST_HASH[file] (sha256 or "absent") and
+# HOST_MANIFEST[file] (what the last sync wrote). Aborts when the host cannot be
+# read. Only a FLEET_DIR that does not exist yet counts as "no host files".
+declare -A HOST_HASH HOST_MANIFEST
+measure_host() { local out rc h n sec=host
+  HOST_HASH=(); HOST_MANIFEST=()
+  out=$({ printf 'd=%q\nset --' "$FLEET_DIR"; printf ' %q' "$@"; printf '\n'; cat <<'EOF2'
+if [ ! -e "$d" ]; then echo "STATE new"; echo END; exit 0; fi
+cd "$d" 2>/dev/null || { echo "cannot read FLEET_DIR $d on the host" >&2; exit 4; }
+echo "STATE present"
+for f in "$@"; do if [ -e "$f" ]; then sha256sum -- "$f" || exit 5; else echo "absent  $f"; fi; done
+echo "--- manifest"
+if [ -e .fleet-sync-manifest ]; then cat .fleet-sync-manifest || exit 5; fi
+echo END
+EOF2
+  } | rx) || { rc=$?; echo "sync aborted: could not read the host files (exit $rc). Nothing was copied." >&2; exit 1; }
+  [ "${out##*$'\n'}" = END ] || { echo "sync aborted: incomplete answer from the host. Nothing was copied." >&2; exit 1; }
+  while read -r h n; do
+    case "$h" in STATE|END) continue ;; ---) sec=manifest; continue ;; esac
+    [ -n "$n" ] || continue
+    if [ "$sec" = host ]; then HOST_HASH[$n]=$h; else HOST_MANIFEST[$n]=$h; fi
+  done <<<"$out"
+  for n in "$@"; do [ -n "${HOST_HASH[$n]:-}" ] || HOST_HASH[$n]=absent; done; }
+
+# CONFLICTS: host files that differ from the local copy and from what the last
+# sync wrote. Those hold edits made on the host since then.
+find_conflicts() { local f l; CONFLICTS=(); measure_host "$@"
+  for f in "$@"; do
+    [ "${HOST_HASH[$f]}" = absent ] && continue
+    l=$(sha256 < "$(src_of "$f")" | cut -d' ' -f1)
+    [ "${HOST_HASH[$f]}" = "$l" ] || [ "${HOST_HASH[$f]}" = "${HOST_MANIFEST[$f]:-}" ] || CONFLICTS+=("$f")
+  done; }
+
+refuse_conflicts() {
+  echo "sync refused: these host files were changed on the host since the last sync and differ from the local copy:" >&2
+  printf '  %s\n' "$@" >&2
+  echo "Pull them first: fleet pull ${*}   (then merge your local change and sync again)" >&2
+  echo "Or overwrite the host copies: fleet sync --force" >&2
+  exit 1; }
+
+# Host-side shell function: merge "sha256  name" lines from stdin into the manifest.
+REMOTE_MERGE='merge_manifest() { { cat .fleet-sync-manifest 2>/dev/null; cat; } | awk '"'"'{ if (!($2 in h)) o[++n]=$2; h[$2]=$1 } END { for (i=1;i<=n;i++) print h[o[i]] "  " o[i] }'"'"' > .fleet-sync-manifest.tmp && mv .fleet-sync-manifest.tmp .fleet-sync-manifest; }'
+
+# Synced and pulled file names must be plain: the manifest and the host scripts
+# rely on names without spaces, quotes or backslashes.
+check_names() { local f bad=()
+  for f in "$@"; do [[ "$f" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || bad+=("$f"); done
+  [ ${#bad[@]} = 0 ] && return 0
+  echo "refused, nothing copied: file names may only use letters, digits, '.', '_' and '-' (and not start with '.' or '-'):" >&2
+  printf '  %q\n' "${bad[@]}" >&2
+  echo "Rename or move these files out of the fleet dir." >&2
+  exit 1; }
+
+# do_sync <force 0|1> <file...>: copy files to FLEET_DIR, refusing to drop host edits unless forced.
+do_sync() { local force=$1 tmp; shift
+  check_names "$@"
+  if same_dir; then
+    [[ " $* " == *" watchdog.sh "* ]] && cp "$PLUGIN_DIR/scripts/watchdog.sh" "$LOCAL_DIR/watchdog.sh"
+    echo "FLEET_DIR is the local fleet dir, nothing else to copy"; return 0
+  fi
+  if [ "$force" != 1 ]; then
+    find_conflicts "$@"; [ ${#CONFLICTS[@]} = 0 ] || refuse_conflicts "${CONFLICTS[@]}"
+  fi
+  tmp=$(mktemp -d)
+  for f in "$@"; do cp "$(src_of "$f")" "$tmp/$f"; done
+  # One host-side step: unpack to a temp dir, re-check that the host files are
+  # still what was measured above, then move them in and record the staged
+  # hashes as the new baseline. A host edit in the few milliseconds between that
+  # re-check and the move can still be lost.
+  local rc=0
+  { printf 'd=%q\nforce=%q\nnames=(' "$FLEET_DIR" "$force"; printf ' %q' "$@"; printf ' )\nexpect=('
+    for f in "$@"; do printf ' %q' "${HOST_HASH[$f]:-skip}"; done; printf ' )\nstaged=('
+    for f in "$@"; do printf ' %q' "$(sha256 < "$tmp/$f" | cut -d' ' -f1)"; done; printf ' )\n'
+    printf '%s\n' "$REMOTE_MERGE"
+    cat <<'EOF2'
+mkdir -p "$d" && cd "$d" || { echo "cannot write FLEET_DIR $d on the host" >&2; exit 4; }
+t=$(mktemp -d .fleet-sync-XXXXXX) || exit 4
+trap 'rm -rf "$t"' EXIT
+base64 -d > "$t/p.tar" <<'FLEET_TAR_EOF' || exit 5
+EOF2
+    COPYFILE_DISABLE=1 tar --no-xattrs -C "$tmp" -cf - "$@" | base64
+    cat <<'EOF2'
+FLEET_TAR_EOF
+mkdir "$t/x" && tar -C "$t/x" -xf "$t/p.tar" || exit 5
+[ ! -f "$t/x/watchdog.sh" ] || bash -n "$t/x/watchdog.sh" || exit 5
+changed=()
+if [ "$force" != 1 ]; then
+  for i in "${!names[@]}"; do f=${names[$i]}; cur=absent
+    [ -e "$f" ] && cur=$(sha256sum -- "$f" | cut -d' ' -f1)
+    [ "$cur" = "${expect[$i]}" ] || changed+=("$f"); done
+fi
+if [ ${#changed[@]} -gt 0 ]; then
+  echo "sync aborted: changed on the host during the sync: ${changed[*]}. Nothing was copied. Run fleet sync again." >&2; exit 7; fi
+for f in "${names[@]}"; do mv -f "$t/x/$f" "./$f" || exit 5; done
+for i in "${!names[@]}"; do printf '%s  %s\n' "${staged[$i]}" "${names[$i]}"; done | merge_manifest || exit 5
+echo "synced: $(ls | tr "\n" " ")"
+EOF2
+  } | rx || rc=$?
+  rm -rf "$tmp"; [ "$rc" = 0 ] || exit "$rc"; }
+
+# Script lines that write local file $2 to $1 in FLEET_DIR on the host. The
+# bytes go as base64, so no message text is ever read as shell. A base64 line
+# cannot equal the delimiter, which has an underscore.
+upload_msg() { printf 'base64 -d > %q <<'"'"'FLEET_B64_EOF'"'"' || exit 8\n' "$1"; base64 < "$2"; printf 'FLEET_B64_EOF\n'; }
+
+# Paste one message file into every agent. Keeps going past failures, prints
+# one line per agent, and fails when any agent did not get it.
+do_broadcast() { local f=$1 name row sessions=()
+  for row in "${AGENTS[@]}"; do sessions+=("${row%%|*}"); done
+  name="msg-$(date -u +%Y%m%dT%H%M%SZ)-broadcast.txt"
+  { upload_msg "$name" "$f"; printf 'MSG=%q\nfail=0\nfor s in' "$name"; printf ' %q' "${sessions[@]}"; printf '; do\n'
+    cat <<'EOF'
+  out=$(paste_file "$s" "$MSG" 2>&1); rc=$?
+  if [ "$rc" = 0 ]; then r=delivered; else r="NOT delivered"; fail=1; fi
+  printf '%s: %s (exit %s): %s\n' "$s" "$r" "$rc" "$out"
+done
+exit "$fail"
+EOF
+  } | rx_helpers; }
+
+# Watchdog log filter: actionable lines always, routine lines only when an agent's state changes.
+MONITOR_AWK='
+/nudge|REPLACED|STARTED|FAILED|DENIED|dialog|DRY|missing|LOWDISK|CTXROTATE|end time|state=dead|state=stalled|watchdog start|Connection|closed|error|Timeout|not responding/ { print; fflush(); next }
+/disk avail/ { next }
+{ s=$2; st=$3; if (last[s] != st) { last[s]=st; print; fflush() } }'
+
+monitor_cmd() { local tailcmd src
+  tailcmd="tail -n0 -F $FLEET_DIR/watchdog.log"
+  if [ -z "${REMOTE_SSH:-}" ]; then src="$tailcmd"
+  elif [ -n "${REMOTE_USER:-}" ]; then src="$(remote_cmd_prefix) 'su - $REMOTE_USER -c \"$tailcmd\"'"
+  else src="$(remote_cmd_prefix) '$tailcmd'"; fi
+  printf "%s 2>&1 | awk '%s'\n" "$src" "$MONITOR_AWK"; }
+
+# Handoff skeleton (references/handoff.md) filled with live data from the host.
+handoff_md() { local t
+  printf '# Supervisor handoff %s\n\nGenerated %s by fleet handoff. Fill in every empty section before you hand over. No secrets.\n\n' \
+    "${1:-}" "$(date -u +%FT%TZ)"
+  echo "## 1. Where things run"; echo
+  echo "- Fleet: \`$FLEET\`, fleet dir on the host: \`$FLEET_DIR\`, local fleet dir: \`$LOCAL_DIR\`"
+  echo "- Host access: REMOTE_SSH \`${REMOTE_SSH:-(local)}\`, REMOTE_USER \`${REMOTE_USER:-(none)}\`"
+  echo "- AGENT_CWD \`${AGENT_CWD:-}\`, CLAUDE_CONFIG_DIR \`${CLAUDE_CONFIG_DIR:-(default)}\`, CLAUDE_ARGS \`${CLAUDE_ARGS:-}\`"
+  echo "- END_AT \`${END_AT:-}\`, CTX_MAX \`${CTX_MAX:-85}\`, DISK_PATH \`${DISK_PATH:-/}\`, DISK_MIN_G \`${DISK_MIN_G:-40}\`"
+  echo; echo "Agents (live, checked $(date -u +%FT%TZ)):"; echo
+  cat <<'EOF' | rx_helpers
+for s in "${SESSIONS[@]}"; do
+  if tmux has-session -t "$s" 2>/dev/null; then pid=$(claude_pid "$s"); ctx=$(ctx_pct "$(screen "$s")"); tm=present
+  else pid=; ctx=; tm=missing; fi
+  last=$(rg -F " $s " "$LOG" 2>/dev/null | tail -1)
+  printf -- '- `%s` "%s": tmux session %s, claude pid %s, context %s%%\n  - last watchdog line: `%s`\n' \
+    "$s" "${NAME[$s]}" "$tm" "${pid:-none}" "${ctx:-?}" "${last:-none}"
+done
+EOF
+  echo; echo "Worktree or clone per agent: (fill in)"
+  echo; echo "## 2. Watchdog"; echo
+  { printf 'cd %q || exit 1\nMONITOR_AWK=%q\nW=%q\n' "$FLEET_DIR" "$MONITOR_AWK" "$FLEET-watchdog"
+    cat <<'EOF'
+if tmux has-session -t "$W" 2>/dev/null; then echo "- tmux session \`$W\`: running"; else echo "- tmux session \`$W\`: NOT running"; fi
+echo "- Restart after a reboot: \`fleet watchdog start\`, then \`fleet start\`"
+echo; echo "Last 30 actionable watchdog log lines:"; echo; echo '```'
+awk "$MONITOR_AWK" watchdog.log 2>/dev/null | tail -n 30
+echo '```'
+EOF
+  } | rx
+  echo; echo "## 3. Monitor"; echo; echo '```'; monitor_cmd; echo '```'
+  echo; echo "## 4. Owner decisions"; echo
+  echo "(each decision with its time and the message files it went out in; mark agent decisions and supervisor suggestions as such)"
+  echo; echo "Message files on the host (UTC):"; echo
+  printf 'cd %q || exit 1\nTZ=UTC ls -l --time-style=+%%FT%%TZ msg-*.txt 2>/dev/null | awk '"'"'{print "- " $6 " " $7}'"'"'\n' "$FLEET_DIR" | rx || true
+  for t in "5. Verified state" "6. Pending" "7. Human steps" "8. Warnings" "9. Transcript"; do printf '\n## %s\n\n' "$t"; done
+  }
+
 cmd=${1:-}; shift || true
 case "$cmd" in
   init)
@@ -50,36 +234,91 @@ case "$cmd" in
       cp "$PLUGIN_DIR/templates/$f" "$d/$f"; echo "created $d/$f"; done
     echo "Next: edit $d/fleet.conf and write one prompt file per agent, then: cd $d && fleet sync && fleet start" ;;
   sync)
+    load_conf; force=0
+    case "${1:-}" in --force) force=1 ;; "") ;; *) echo "usage: fleet sync [--force]" >&2; exit 1 ;; esac
+    mapfile -t files < <(sync_files)
+    do_sync "$force" "${files[@]}" watchdog.sh ;;
+  pull)
     load_conf
-    files=(fleet.conf); while IFS= read -r f; do files+=("$f"); done < <(cd "$LOCAL_DIR" && ls ./*.txt 2>/dev/null | sed 's|^\./||' | rg -v '^(start|replace)-')
-    if [ -z "${REMOTE_SSH:-}" ] && [ "$(cd "$FLEET_DIR" 2>/dev/null && pwd)" = "$LOCAL_DIR" ]; then
-      cp "$PLUGIN_DIR/scripts/watchdog.sh" "$LOCAL_DIR/watchdog.sh"
-    else
-      tmp=$(mktemp -d); cp "$PLUGIN_DIR/scripts/watchdog.sh" "$tmp/"; (cd "$LOCAL_DIR" && cp "${files[@]}" "$tmp/")
-      COPYFILE_DISABLE=1 tar --no-xattrs -C "$tmp" -cf - . | { if [ -z "${REMOTE_SSH:-}" ]; then mkdir -p "$FLEET_DIR" && tar -C "$FLEET_DIR" -xf -
-        elif [ -n "${REMOTE_USER:-}" ]; then $REMOTE_SSH "su - $REMOTE_USER -c 'mkdir -p $FLEET_DIR && tar -C $FLEET_DIR -xf -'"
-        else $REMOTE_SSH "mkdir -p $FLEET_DIR && tar -C $FLEET_DIR -xf -"; fi; }
-      rm -rf "$tmp"
-    fi
-    printf 'cd %q && bash -n watchdog.sh && echo "synced: $(ls | tr "\\n" " ")"\n' "$FLEET_DIR" | rx ;;
+    same_dir && { echo "FLEET_DIR is the local fleet dir, nothing to pull"; exit 0; }
+    if [ $# -gt 0 ]; then names=("$@"); else mapfile -t names < <(sync_files); fi
+    check_names "${names[@]}"
+    for n in "${names[@]}"; do
+      [ "$n" != watchdog.sh ] || { echo "cannot pull watchdog.sh: it comes from the plugin" >&2; exit 1; }
+    done
+    tmp=$(mktemp -d)
+    { printf 'cd %q || exit 1\nset --\nfor f in' "$FLEET_DIR"; printf ' %q' "${names[@]}"
+      printf '; do if [ -f "$f" ]; then set -- "$@" "$f"; else echo "not on the host: $f" >&2; fi; done\n[ $# -gt 0 ] || exit 3\ntar -cf - "$@"\n'; } | rx | tar -C "$tmp" -xf -
+    pulled=(); hashes=()
+    for f in "${names[@]}"; do
+      [ -f "$tmp/$f" ] || continue
+      pulled+=("$f"); hashes+=("$(sha256 < "$tmp/$f" | cut -d' ' -f1)")
+      if [ -f "$LOCAL_DIR/$f" ] && ! cmp -s "$tmp/$f" "$LOCAL_DIR/$f"; then
+        cp "$LOCAL_DIR/$f" "$LOCAL_DIR/$f.local-bak"; echo "pulled $f (previous local copy saved as $f.local-bak)"
+      else echo "pulled $f"; fi
+      mv "$tmp/$f" "$LOCAL_DIR/$f"
+    done
+    rm -rf "$tmp"
+    [ ${#pulled[@]} -gt 0 ] || exit 0
+    # The pulled copies become the sync baseline, but only where the host file
+    # still has the pulled content.
+    { printf 'cd %q || exit 4\nnames=(' "$FLEET_DIR"; printf ' %q' "${pulled[@]}"; printf ' )\nhashes=('
+      printf ' %q' "${hashes[@]}"; printf ' )\n%s\n' "$REMOTE_MERGE"
+      cat <<'EOF2'
+lines=; bad=0
+for i in "${!names[@]}"; do f=${names[$i]}; cur=$(sha256sum -- "$f" 2>/dev/null | cut -d' ' -f1)
+  if [ "$cur" = "${hashes[$i]}" ]; then lines+="${hashes[$i]}  $f"$'\n'
+  else echo "$f changed on the host during the pull, its sync baseline was not updated. Pull it again." >&2; bad=1; fi
+done
+[ -z "$lines" ] || printf '%s' "$lines" | merge_manifest || exit 5
+exit "$bad"
+EOF2
+    } | rx ;;
   start)
     load_conf
     { printf 'want=(%s)\n' "$*"
       cat <<'EOF'
+fail=0
 for s in "${SESSIONS[@]}"; do
   [ ${#want[@]} -gt 0 ] && [[ " ${want[*]} " != *" $s "* ]] && continue
   if [ -n "$(claude_pid "$s" 2>/dev/null)" ]; then echo "$s: already running"; continue; fi
-  [ -f "$DIR/${PROMPT[$s]}" ] || { echo "$s: prompt file ${PROMPT[$s]} missing" >&2; continue; }
-  start_agent "$s" && echo "$s: started"
+  [ -f "$DIR/${PROMPT[$s]}" ] || { echo "$s: prompt file ${PROMPT[$s]} missing" >&2; fail=1; continue; }
+  if start_agent "$s"; then echo "$s: started"; else echo "$s: start FAILED: $LAUNCH_ERR" >&2; fail=1; fi
 done
+exit "$fail"
 EOF
     } | rx_helpers ;;
   send)
     load_conf; s=${1:?usage: fleet send <session> <file>}; f=${2:?usage: fleet send <session> <file>}
     [ -f "$f" ] || { echo "no file $f" >&2; exit 1; }
     name="msg-$(date -u +%Y%m%dT%H%M%SZ)-$s.txt"
-    { printf 'cat > %q <<'"'"'FLEET_MSG_EOF'"'"'\n' "$name"; cat "$f"; printf '\nFLEET_MSG_EOF\n'
-      printf 'paste_file %q %q\n' "$s" "$name"; } | rx_helpers ;;
+    { upload_msg "$name" "$f"; printf 'paste_file %q %q\n' "$s" "$name"; } | rx_helpers ;;
+  broadcast)
+    load_conf; f=${1:?usage: fleet broadcast <file>}
+    [ -f "$f" ] || { echo "no file $f" >&2; exit 1; }
+    do_broadcast "$f" ;;
+  decide)
+    load_conf; text=${1:?usage: fleet decide \"<text>\"}
+    [[ "$text" != *$'\n'* ]] || { echo "decide takes one line of text" >&2; exit 1; }
+    a=$LOCAL_DIR/autonomy.txt; [ -f "$a" ] || { echo "no $a" >&2; exit 1; }
+    # Check the guard before touching the local file, so a refusal leaves nothing half done.
+    if ! same_dir; then find_conflicts autonomy.txt; [ ${#CONFLICTS[@]} = 0 ] || refuse_conflicts autonomy.txt; fi
+    last=$(rg -o '^(\d+)\.' -r '$1' "$a" | sort -n | tail -1) || last=
+    rule="$(( ${last:-0} + 1 )). Decision from the owner ($(date -u +%FT%TZ), relayed by the supervisor): $text"
+    [ -s "$a" ] && [ -n "$(tail -c1 "$a")" ] && echo >> "$a"
+    keep=$(mktemp); cp "$a" "$keep"
+    printf '%s\n' "$rule" >> "$a"; echo "added to autonomy.txt: $rule"
+    # Sync in a subshell so a refusal or failure comes back here and the local
+    # file can be restored instead of holding a rule the host never got.
+    set +e; (set -e; do_sync 0 autonomy.txt); rc=$?; set -e
+    if [ "$rc" != 0 ]; then
+      cp "$keep" "$a"; rm -f "$keep"
+      echo "decision NOT recorded: the sync failed (exit $rc), so the local autonomy.txt was restored to its previous content and nothing was broadcast" >&2
+      exit "$rc"; fi
+    rm -f "$keep"
+    msg=$(mktemp); printf '%s\n' "$rule" > "$msg"
+    rc=0; do_broadcast "$msg" || rc=$?
+    rm -f "$msg"; exit "$rc" ;;
   status)
     load_conf
     cat <<'EOF' | rx_helpers
@@ -106,18 +345,14 @@ EOF
   log)
     load_conf; printf 'tail -n %q %q/watchdog.log\n' "${1:-30}" "$FLEET_DIR" | rx ;;
   monitor-cmd)
-    load_conf
-    tailcmd="tail -n0 -F $FLEET_DIR/watchdog.log"
-    if [ -z "${REMOTE_SSH:-}" ]; then src="$tailcmd"
-    elif [ -n "${REMOTE_USER:-}" ]; then src="$(remote_cmd_prefix) 'su - $REMOTE_USER -c \"$tailcmd\"'"
-    else src="$(remote_cmd_prefix) '$tailcmd'"; fi
-    cat <<EOF
-$src 2>&1 | awk '
-/nudge|REPLACED|STARTED|DENIED|dialog|DRY|missing|LOWDISK|CTXROTATE|end time|state=dead|state=stalled|watchdog start|Connection|closed|error|Timeout|not responding/ { print; fflush(); next }
-/disk avail/ { next }
-{ s=\$2; st=\$3; if (last[s] != st) { last[s]=st; print; fflush() } }'
-EOF
-    ;;
+    load_conf; monitor_cmd ;;
+  handoff)
+    load_conf; name=${1:-}
+    if [ -z "$name" ]; then handoff_md; exit 0; fi
+    case "$name" in */*|.*) echo "handoff name must be a plain word" >&2; exit 1 ;; esac
+    out=$LOCAL_DIR/HANDOFF-$name.md
+    [ -e "$out" ] && { echo "$out exists, not overwriting" >&2; exit 1; }
+    handoff_md "$name" > "$out.tmp" && mv "$out.tmp" "$out" && echo "wrote $out" ;;
   ""|-h|--help|help) usage ;;
   *) echo "unknown command: $cmd" >&2; usage; exit 1 ;;
 esac
