@@ -94,6 +94,9 @@ refuse_conflicts() {
   echo "Or overwrite the host copies: fleet sync --force" >&2
   exit 1; }
 
+# Host-side shell function: merge "sha256  name" lines from stdin into the manifest.
+REMOTE_MERGE='merge_manifest() { { cat .fleet-sync-manifest 2>/dev/null; cat; } | awk '"'"'{ if (!($2 in h)) o[++n]=$2; h[$2]=$1 } END { for (i=1;i<=n;i++) print h[o[i]] "  " o[i] }'"'"' > .fleet-sync-manifest.tmp && mv .fleet-sync-manifest.tmp .fleet-sync-manifest; }'
+
 # do_sync <force 0|1> <file...>: copy files to FLEET_DIR, refusing to drop host edits unless forced.
 do_sync() { local force=$1 tmp; shift
   if same_dir; then
@@ -105,19 +108,40 @@ do_sync() { local force=$1 tmp; shift
   fi
   tmp=$(mktemp -d)
   for f in "$@"; do cp "$(src_of "$f")" "$tmp/$f"; done
-  COPYFILE_DISABLE=1 tar --no-xattrs -C "$tmp" -cf - . | { if [ -z "${REMOTE_SSH:-}" ]; then mkdir -p "$FLEET_DIR" && tar -C "$FLEET_DIR" -xf -
-    elif [ -n "${REMOTE_USER:-}" ]; then $REMOTE_SSH "su - $REMOTE_USER -c 'mkdir -p $FLEET_DIR && tar -C $FLEET_DIR -xf -'"
-    else $REMOTE_SSH "mkdir -p $FLEET_DIR && tar -C $FLEET_DIR -xf -"; fi; }
-  rm -rf "$tmp"
-  # Record what this sync wrote, so the next sync can tell host edits from its own copies.
-  { printf 'cd %q || exit 1\n{ [ ! -f watchdog.sh ] || bash -n watchdog.sh; } || exit 1\n' "$FLEET_DIR"
-    printf '{ cat .fleet-sync-manifest 2>/dev/null; sha256sum'; printf ' %q' "$@"; printf '; }'
-    cat <<'EOF'
- | awk '{ if (!($2 in h)) o[++n]=$2; h[$2]=$1 } END { for (i=1;i<=n;i++) print h[o[i]] "  " o[i] }' > .fleet-sync-manifest.tmp \
-  && mv .fleet-sync-manifest.tmp .fleet-sync-manifest || exit 1
+  # One host-side step: unpack to a temp dir, re-check that the host files are
+  # still what was measured above, then move them in and record the staged
+  # hashes as the new baseline. A host edit in the few milliseconds between that
+  # re-check and the move can still be lost.
+  local rc=0
+  { printf 'd=%q\nforce=%q\nnames=(' "$FLEET_DIR" "$force"; printf ' %q' "$@"; printf ' )\nexpect=('
+    for f in "$@"; do printf ' %q' "${HOST_HASH[$f]:-skip}"; done; printf ' )\nstaged=('
+    for f in "$@"; do printf ' %q' "$(sha256 < "$tmp/$f" | cut -d' ' -f1)"; done; printf ' )\n'
+    printf '%s\n' "$REMOTE_MERGE"
+    cat <<'EOF2'
+mkdir -p "$d" && cd "$d" || { echo "cannot write FLEET_DIR $d on the host" >&2; exit 4; }
+t=$(mktemp -d .fleet-sync-XXXXXX) || exit 4
+trap 'rm -rf "$t"' EXIT
+base64 -d > "$t/p.tar" <<'FLEET_TAR_EOF' || exit 5
+EOF2
+    COPYFILE_DISABLE=1 tar --no-xattrs -C "$tmp" -cf - "$@" | base64
+    cat <<'EOF2'
+FLEET_TAR_EOF
+mkdir "$t/x" && tar -C "$t/x" -xf "$t/p.tar" || exit 5
+[ ! -f "$t/x/watchdog.sh" ] || bash -n "$t/x/watchdog.sh" || exit 5
+changed=()
+if [ "$force" != 1 ]; then
+  for i in "${!names[@]}"; do f=${names[$i]}; cur=absent
+    [ -e "$f" ] && cur=$(sha256sum -- "$f" | cut -d' ' -f1)
+    [ "$cur" = "${expect[$i]}" ] || changed+=("$f"); done
+fi
+if [ ${#changed[@]} -gt 0 ]; then
+  echo "sync aborted: changed on the host during the sync: ${changed[*]}. Nothing was copied. Run fleet sync again." >&2; exit 7; fi
+for f in "${names[@]}"; do mv -f "$t/x/$f" "./$f" || exit 5; done
+for i in "${!names[@]}"; do printf '%s  %s\n' "${staged[$i]}" "${names[$i]}"; done | merge_manifest || exit 5
 echo "synced: $(ls | tr "\n" " ")"
-EOF
-  } | rx; }
+EOF2
+  } | rx || rc=$?
+  rm -rf "$tmp"; [ "$rc" = 0 ] || exit "$rc"; }
 
 # Script lines that write local file $2 to $1 in FLEET_DIR on the host.
 upload_msg() { printf 'cat > %q <<'"'"'FLEET_MSG_EOF'"'"'\n' "$1"; cat "$2"; printf '\nFLEET_MSG_EOF\n'; }

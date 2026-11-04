@@ -26,7 +26,7 @@ fleet decide "Ship the tablet layout first"    # numbered rule in autonomy.txt, 
 fleet handoff sup-2                            # HANDOFF-sup-2.md draft with live fleet data
 ```
 
-`fleet sync` refuses when a file on the host was edited since the last sync (supervisors edit `autonomy.txt` there). Run `fleet pull <file>` to bring it back and merge, or `fleet sync --force` to overwrite it. A fleet last synced by version 0.1 has no sync manifest yet, so its first sync after the upgrade refuses for every host file that differs from the local copy.
+`fleet sync` refuses when a file on the host was edited since the last sync (supervisors edit `autonomy.txt` there). Run `fleet pull <file>` to bring it back and merge, or `fleet sync --force` to overwrite it. A fleet last synced by version 0.1 has no sync manifest yet, so its first sync after the upgrade refuses for every host file that differs from the local copy. Sync checks the host files again in the same host-side step that installs the new copies and aborts if they changed. A host edit in the few milliseconds between that check and the install can still be lost.
 
 ## Requirements
 
