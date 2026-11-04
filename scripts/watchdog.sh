@@ -18,7 +18,9 @@ CTX_MAX=${CTX_MAX:-85}
 for a in "$@"; do case "$a" in --once) ONCE=1;; --dry) DRY=1;; --quiet-start) QUIET=1;; esac; done
 declare -A NAME PROMPT SIG STRIKE NUDGED REPL STATE WAIT IDLE_NUDGED WORKRUN LASTNUDGE DIALOG ROT
 SESSIONS=()
-for row in "${AGENTS[@]}"; do IFS='|' read -r s t p <<<"$row"; SESSIONS+=("$s"); NAME[$s]=$t; PROMPT[$s]=$p; done
+for row in "${AGENTS[@]}"; do IFS='|' read -r s t p <<<"$row"; SESSIONS+=("$s"); NAME[$s]=$t; PROMPT[$s]=$p
+  # The replacement count survives a watchdog restart, so replacement names do not repeat.
+  r=$(cat "$DIR/.repl-$s" 2>/dev/null); [[ "$r" =~ ^[0-9]+$ ]] && REPL[$s]=$r; done
 TICK=0; LOWDISK_AT=0
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$LOG"; [ "$ONCE" = 1 ] && printf '%s\n' "$*"; return 0; }
 
@@ -103,7 +105,7 @@ replace() { local s=$1 pid=$2 why="hung and was stopped by the watchdog" cwd
   [ -n "$pid" ] && [ -d "/proc/$pid/cwd" ] && cwd=$(readlink -f "/proc/$pid/cwd")
   [ "$DRY" = 1 ] && { log "$s DRY would kill pid ${pid:-none} and start a replacement in $cwd"; return; }
   [ -n "$pid" ] && kill "$pid" 2>/dev/null; sleep 5; [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
-  REPL[$s]=$(( ${REPL[$s]:-0} + 1 ))
+  REPL[$s]=$(( ${REPL[$s]:-0} + 1 )); printf '%s\n' "${REPL[$s]}" > "$DIR/.repl-$s"
   local n="${NAME[$s]} (replacement ${REPL[$s]})" f=$DIR/replace-$s.txt
   { cat "$DIR/${PROMPT[$s]}"; printf '\n'; [ -f "$DIR/autonomy.txt" ] && cat "$DIR/autonomy.txt"; printf '\n'
     [ -f "$DIR/where-$s.txt" ] && cat "$DIR/where-$s.txt"; printf '\n%s\n' \
