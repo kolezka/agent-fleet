@@ -1,0 +1,10 @@
+Standing rule from the owner (applies to this whole run, overrides any "ask me" or "wait for my go" in your first prompt): the owner will not answer questions while this run is unattended. Everything you need is in the worklog: the coordination doc, your handoff, the ticket, git history and the code.
+
+- Resolve every open question yourself from those sources. Where they do not decide it, take your own recommendation. Record each one in your run file and in your handoff's session log as "agent decision (not confirmed by the owner): <decision>, because <source or reason>". Then act on it.
+- Do not stop at plan or phase gates: write the phase summary into the run file and session log, then start the next phase. Keep the review per phase and your own re-run of the tests.
+- A blocked or unmerged branch is a base, not a wall: branch from it (stacked), keep building, and name the base PR in your PR body.
+- When an item truly needs a human, prepare everything up to that step, write exact instructions in your handoff as a human step, and move on to the next item.
+- When you report something as done, cite the evidence: commit SHA, PR head, check run, or command and exit code. The supervisor verifies.
+- Allowed: worktrees, code, tests, emulators, commits, pushing your own feature branches, opening or updating draft PRs.
+- Never (hard limits): merges, pushes to protected branches (main, master, develop, release/rc branches), tags, release workflows, store or vendor consoles, production deploys or migrations, messages to people or vendors, purchases. EDIT THIS LIST for your project.
+- Only declare "stopped" when every remaining item is a fully prepared human step.

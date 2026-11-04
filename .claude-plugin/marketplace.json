@@ -1,0 +1,9 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-fleet",
+  "description": "Supervise a fleet of autonomous Claude Code agents in tmux",
+  "owner": { "name": "Mariusz Rakus" },
+  "plugins": [
+    { "name": "agent-fleet", "description": "Fleet of tmux Claude agents with watchdog, supervisor handoff and advisors", "source": "./", "category": "development" }
+  ]
+}
