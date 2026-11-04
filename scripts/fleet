@@ -12,6 +12,8 @@ fleet pull [file...]          copy host files back into the local fleet dir (def
 fleet start [session...]      start agents that are not running (all when none named)
 fleet send <session> <file>   paste a message file into an agent, refuse on dialog or typed input
 fleet broadcast <file>        send one message file to every agent, one result line per agent
+fleet decide "<text>"         add an owner decision as the next numbered rule in autonomy.txt,
+                              sync autonomy.txt and broadcast the rule to every agent
 fleet status                  tmux sessions, last watchdog state per agent, context %
 fleet screen <session> [n]    last n lines (default 40) of an agent's screen
 fleet watchdog start|stop|dry run the watchdog in tmux session <FLEET>-watchdog, or one dry check
@@ -169,6 +171,20 @@ EOF
     load_conf; f=${1:?usage: fleet broadcast <file>}
     [ -f "$f" ] || { echo "no file $f" >&2; exit 1; }
     do_broadcast "$f" ;;
+  decide)
+    load_conf; text=${1:?usage: fleet decide \"<text>\"}
+    [[ "$text" != *$'\n'* ]] || { echo "decide takes one line of text" >&2; exit 1; }
+    a=$LOCAL_DIR/autonomy.txt; [ -f "$a" ] || { echo "no $a" >&2; exit 1; }
+    # Check the guard before touching the local file, so a refusal leaves nothing half done.
+    if ! same_dir; then c=$(sync_conflicts autonomy.txt); [ -z "$c" ] || refuse_conflicts autonomy.txt; fi
+    last=$(rg -o '^(\d+)\.' -r '$1' "$a" | sort -n | tail -1) || last=
+    rule="$(( ${last:-0} + 1 )). Decision from the owner ($(date -u +%FT%TZ), relayed by the supervisor): $text"
+    [ -s "$a" ] && [ -n "$(tail -c1 "$a")" ] && echo >> "$a"
+    printf '%s\n' "$rule" >> "$a"; echo "added to autonomy.txt: $rule"
+    do_sync 0 autonomy.txt
+    msg=$(mktemp); printf '%s\n' "$rule" > "$msg"
+    rc=0; do_broadcast "$msg" || rc=$?
+    rm -f "$msg"; exit "$rc" ;;
   status)
     load_conf
     cat <<'EOF' | rx_helpers
