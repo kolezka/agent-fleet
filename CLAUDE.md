@@ -25,7 +25,7 @@ A Claude Code plugin for supervising a fleet of autonomous Claude Code agents. T
 bash -n scripts/fleet && bash -n scripts/watchdog.sh
 shellcheck -S warning scripts/fleet scripts/watchdog.sh
 jq . .claude-plugin/*.json >/dev/null
-rg -n '—|–' .   # must find nothing: no long dashes anywhere
+rg -n '\x{2013}|\x{2014}' .   # must find nothing: no en or em dashes anywhere
 ```
 
 A behaviour change also needs a smoke test on a real Linux host with a scratch fleet. Use its own `FLEET_DIR` and session names, and remove it afterwards:
