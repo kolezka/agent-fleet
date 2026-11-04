@@ -24,8 +24,9 @@ Advisors are earlier supervisor sessions that handed over. They answer questions
 3. Write one prompt per agent from `agent.example.txt`: scope, docs to read, host facts you checked yourself, the phased-delivery repo profile, and the other agents' session names.
 4. Edit the hard-limit list in `autonomy.txt` with the owner. Never widen it on your own. That file is appended to every start and every replacement prompt.
 5. `fleet sync`, then `fleet watchdog dry` and read the output. Sync refuses when a host file was edited since the last sync: `fleet pull <file>` and merge, or `fleet sync --force`. Every agent should show state=dead or missing (nothing started yet) and the output should have no bash errors.
-6. `fleet start`, then `fleet status`. Then `fleet watchdog start`.
-7. Write `HANDOFF.md` in the fleet dir using `references/handoff.md`. It is the contract any later supervisor reads first.
+6. Before the first start, the owner opens `claude` once by hand in `AGENT_CWD` on the host and answers Claude Code's workspace trust question. Trust is the owner's decision. The plugin never answers it, and `fleet start` fails fast with "workspace trust dialog" until it is done.
+7. `fleet start`, then `fleet status`. A failed start prints `start FAILED: <reason>` and exits non-zero. Then `fleet watchdog start`.
+8. Write `HANDOFF.md` in the fleet dir using `references/handoff.md`. It is the contract any later supervisor reads first.
 
 No cron or launchd entry unless the owner asks for one explicitly. After a host reboot, `fleet watchdog start` and `fleet start` bring it back.
 
@@ -33,7 +34,7 @@ No cron or launchd entry unless the owner asks for one explicitly. After a host 
 
 Arm a Monitor with the output of `fleet monitor-cmd`, timeout 30 min, and re-arm it every time it expires until `END_AT`. Details and the event table are in `references/supervise.md`. Short form:
 
-- Act on: `state=stalled`, `state=dead`, `REPLACED`, `DENIED`, `dialog`, `LOWDISK`, `missing`, `CTXROTATE`, `end time`, and any ssh error (Timeout, Connection closed).
+- Act on: `state=stalled`, `state=dead`, `REPLACED`, `START FAILED`, `REPLACE FAILED`, `DENIED`, `dialog` (`kind=trust` waits for the owner), `LOWDISK`, `missing`, `CTXROTATE`, `end time`, and any ssh error (Timeout, Connection closed).
 - Routine `working` / `tool` / `waiting` changes: one line or nothing.
 - Every agent claim ("pushed", "CI green", "fixed") is unverified until you see it on the primary source: `gh pr view --json headRefOid,statusCheckRollup`, `git ls-remote`, the check run, the exit code.
 

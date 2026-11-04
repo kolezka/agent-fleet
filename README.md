@@ -18,6 +18,7 @@ It grew out of a 48 h run of four TV-platform agents (Apple TV, Android TV, Fire
 fleet init ~/Development/myproj/myfleet && cd ~/Development/myproj/myfleet
 # edit fleet.conf, write one prompt file per agent, edit hard limits in autonomy.txt
 fleet sync && fleet watchdog dry
+# once, by hand on the host: run claude in AGENT_CWD and answer the workspace trust question
 fleet start && fleet watchdog start && fleet status
 fleet monitor-cmd      # arm this with the Monitor tool in the supervisor session
 fleet send agent-a msg.txt
