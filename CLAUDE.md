@@ -13,7 +13,7 @@ A Claude Code plugin for supervising a fleet of autonomous Claude Code agents. T
 
 - Shared logic lives in `watchdog.sh` helpers (`paste_file`, `start_agent`, `dialog_kind`, `user_typing`, `ctx_pct`). `fleet` calls them through `rx_helpers`. Do not copy the logic into `fleet`.
 - Never paste into a pane before Claude Code's UI is detected (`launch` waits for the claude process and `bypass permissions on` or `for shortcuts`). A shell prompt such as starship also shows `❯` and would run the pasted text.
-- `paste_file` must keep refusing when a permission dialog is open (exit 3) or the input line has typed text (exit 4), and must confirm delivery (exit 5 if the first line is not in the pane).
+- `paste_file` must keep refusing when the message file is empty or blank (exit 6), a permission dialog is open (exit 3) or the input line has typed text (exit 4), and must confirm delivery (exit 5 if the first non-empty line is not in the pane).
 - The watchdog never approves a permission dialog. It only denies.
 - Hard limits belong in each fleet's `autonomy.txt`. Do not hardcode project names, hosts, users or branches in scripts or templates. Placeholders go in templates.
 - No cron, launchd or systemd entries. Persistence is the owner's decision per fleet.

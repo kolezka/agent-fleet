@@ -50,16 +50,21 @@ user_typing() { # real (not dim suggestion) text in the input line
   l=$(printf '%s' "$l" | LC_ALL=C sed 's/\xc2\xa0/ /g' | sed -E 's/\x1b\[[0-9;]*m//g; s/^.*❯[[:space:]]*//; s/[[:space:]]+$//')
   [ -n "$l" ]; }
 
-# Paste a file into a session and press Enter. Refuses when a dialog is open or
-# someone is typing. Exit 0 = pasted and its first line is visible in the pane.
-paste_file() { local s=$1 f=$2 probe
+# Paste a file into a session and press Enter. Refuses when the file is blank,
+# a dialog is open or someone is typing. Exit 0 = pasted and its first
+# non-empty line is visible in the pane.
+paste_file() { local s=$1 f=$2 probe _
+  # An empty probe would match any pane, so a blank message is refused.
+  probe=$(rg -m1 '\S' "$f" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'); probe=${probe:0:40}
+  [ -n "$probe" ] || { echo "$s: message file $f is empty or blank, not sent" >&2; return 6; }
   tmux has-session -t "$s" 2>/dev/null || { echo "no session $s" >&2; return 2; }
   dialog_kind "$(screen "$s")" >/dev/null && { echo "$s: dialog open, not sent" >&2; return 3; }
   user_typing "$s" && { echo "$s: text in the input line, not sent" >&2; return 4; }
   tmux load-buffer -b fleet "$f" && tmux paste-buffer -p -d -b fleet -t "$s"; sleep 1; tmux send-keys -t "$s" Enter
-  probe=$(head -1 "$f" | cut -c1-40)
-  sleep 3; tmux capture-pane -p -S -400 -t "$s" | rg -qF -- "$probe" || { echo "$s: pasted but first line not found in pane" >&2; return 5; }
-  echo "$s: delivered"; }
+  # Claude Code can take several seconds to render a long paste after Enter.
+  for _ in $(seq 1 10); do sleep 1
+    tmux capture-pane -p -S -400 -t "$s" | rg -qF -- "$probe" && { echo "$s: delivered"; return 0; }; done
+  echo "$s: pasted but first line not found in pane" >&2; return 5; }
 
 idle_nudge() { local s=$1
   user_typing "$s" && { log "$s idle but user is typing, no nudge"; return; }
