@@ -35,8 +35,10 @@ working_line() { rg -m1 '…\s\((\d+h\s)?(\d+m\s)?\d+s' <<<"$1"; }
 signature() { rg -v 'Reset:|Cost:|No credentials|t/s|^\s*$' <<<"$1" \
   | sed -E 's/\((([0-9]+h )?([0-9]+m )?[0-9]+s)( ·|\))/(T\4/' | md5sum | cut -c1-12; }
 
-dialog_kind() { # prints protected|other when a permission dialog is open
+dialog_kind() { # prints trust|protected|other when a dialog is open
   local scr=$1
+  # Workspace trust is the owner's call and "deny" would pick "No, exit", so it gets its own kind.
+  rg -q 'Is this a project you created or one you trust|Yes, I trust this folder' <<<"$scr" && { echo trust; return 0; }
   rg -q 'Do you want to proceed\?|❯ 1\. Yes' <<<"$scr" || return 1
   rg -q 'git push to a protected target' <<<"$scr" && echo protected || echo other; }
 deny_dialog() { local s=$1 k=$2
@@ -111,15 +113,21 @@ launch() { local s=$1 cwd=$2 n=$3 f=$4
   else tmux new-session -d -s "$s" -x 200 -y 50 -c "$cwd"; fi
   tmux send-keys -t "$s" "claude -n \"$n\" ${CLAUDE_ARGS:-}" Enter
   # Paste only once Claude Code's UI is up. A shell prompt (starship uses ❯ too) would run the text.
-  local ok=0; for _ in $(seq 1 45); do sleep 2
-    [ -n "$(claude_pid "$s")" ] && screen "$s" | rg -q 'bypass permissions on|for shortcuts' && { ok=1; break; }; done
-  [ "$ok" = 1 ] || { log "$s claude UI not detected after 90 s, prompt NOT pasted ($f)"; return 1; }
-  sleep 2; tmux load-buffer -b wd "$f" && tmux paste-buffer -p -d -b wd -t "$s"; sleep 2; tmux send-keys -t "$s" Enter; }
+  # On failure LAUNCH_ERR says why, for the caller's log line.
+  local ok=0 scr; LAUNCH_ERR=; for _ in $(seq 1 45); do sleep 2; scr=$(screen "$s")
+    if [ "$(dialog_kind "$scr")" = trust ]; then
+      LAUNCH_ERR="workspace trust dialog: open claude once in $cwd by hand and trust it"; return 2; fi
+    [ -n "$(claude_pid "$s")" ] && rg -q 'bypass permissions on|for shortcuts' <<<"$scr" && { ok=1; break; }; done
+  [ "$ok" = 1 ] || { LAUNCH_ERR="claude UI not detected after 90 s"; return 1; }
+  sleep 2
+  tmux load-buffer -b wd "$f" && tmux paste-buffer -p -d -b wd -t "$s" || { LAUNCH_ERR="tmux could not paste $f"; return 3; }
+  sleep 2; tmux send-keys -t "$s" Enter || { LAUNCH_ERR="tmux could not press Enter"; return 3; }; }
 
 # First start of an agent: its prompt file plus autonomy.txt.
 start_agent() { local s=$1 f=$DIR/start-$1.txt
   { cat "$DIR/${PROMPT[$s]}"; printf '\n'; [ -f "$DIR/autonomy.txt" ] && cat "$DIR/autonomy.txt"; } > "$f"
-  launch "$s" "${AGENT_CWD:-$HOME}" "${NAME[$s]}" "$f"
+  if ! launch "$s" "${AGENT_CWD:-$HOME}" "${NAME[$s]}" "$f"; then
+    log "$s START FAILED: $LAUNCH_ERR (prompt NOT pasted: $f)"; return 1; fi
   log "$s STARTED \"${NAME[$s]}\" in ${AGENT_CWD:-$HOME}"; }
 
 replace() { local s=$1 pid=$2 why="hung and was stopped by the watchdog" cwd
@@ -133,7 +141,8 @@ replace() { local s=$1 pid=$2 why="hung and was stopped by the watchdog" cwd
   { cat "$DIR/${PROMPT[$s]}"; printf '\n'; [ -f "$DIR/autonomy.txt" ] && cat "$DIR/autonomy.txt"; printf '\n'
     [ -f "$DIR/where-$s.txt" ] && cat "$DIR/where-$s.txt"; printf '\n%s\n' \
 "You are a replacement for a session of this agent that $why at $(date -u +%FT%TZ). Do not start over. If you use the phased-delivery skill, follow its references/resume.md: find your run with git worktree list --porcelain and the run file in each worktree's git dir under phased-delivery/run.md, check git status and log against it, and keep working in that same worktree. Read your handoff's session log. Tell me in two lines where you resume and what was uncommitted. Decisions recorded in the run file or the handoff still hold; questions still open there stay open."; } > "$f"
-  launch "$s" "$cwd" "$n" "$f"
+  if ! launch "$s" "$cwd" "$n" "$f"; then
+    log "$s REPLACE FAILED for pid ${pid:-none}: $LAUNCH_ERR (prompt NOT pasted: $f)"; return 1; fi
   log "$s REPLACED pid ${pid:-none} with \"$n\" in $cwd (${3:-hung})"; }
 
 # Context rotation: at CTX_MAX % ask the lead to save state and answer
@@ -158,6 +167,7 @@ check() { local s=$1 pid scr wl sig limit dk now
   if [ -n "$pid" ] && [ -n "$dk" ]; then
     DIALOG[$s]=$(( ${DIALOG[$s]:-0} + 1 )); STRIKE[$s]=0
     log "$s state=dialog kind=$dk count=${DIALOG[$s]} pid=$pid"
+    [ "$dk" = trust ] && return # never typed into or denied: the supervisor decides
     if { [ "$dk" = protected ] && [ "${DIALOG[$s]}" -ge 2 ]; } || [ "${DIALOG[$s]}" -ge 3 ]; then deny_dialog "$s" "$dk"; DIALOG[$s]=0; fi
     return
   fi
