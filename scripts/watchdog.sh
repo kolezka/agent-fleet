@@ -54,7 +54,11 @@ input_text() { # the text in the input line; empty when it is empty or shows a d
   printf '%s' "$l" | LC_ALL=C sed 's/\xc2\xa0/ /g' | sed -E 's/\x1b\[[0-9;]*m//g; s/^.*❯[[:space:]]*//; s/[[:space:]]+$//'; }
 user_typing() { [ -n "$(input_text "$1")" ]; } # real (not dim suggestion) text in the input line
 
-probe_count() { local n; n=$(tmux capture-pane -p -S - -t "$1" 2>/dev/null | rg -cF -- "$2"); echo "${n:-0}"; }
+# Count lines holding $2 in the whole pane history. Fails (rc 1) when the pane cannot be read,
+# so a failed capture is never taken as a baseline of zero.
+probe_count() { local out; out=$(tmux capture-pane -p -S - -t "$1" 2>/dev/null) || return 1
+  rg -cF -- "$2" <<<"$out" || echo 0; }
+DIALOG_TEXT='Do you want to proceed\?|❯ 1\. Yes|Is this a project you created or one you trust|Yes, I trust this folder'
 
 # Paste a file into a session and press Enter. Refuses when the file is blank,
 # a dialog is open or someone is typing. Exit 0 = pasted and its first
@@ -64,24 +68,27 @@ paste_file() { local s=$1 f=$2 probe before _
   # An empty probe would match any pane, so a blank message is refused.
   probe=$(rg -m1 '\S' "$f" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'); probe=${probe:0:40}
   [ -n "$probe" ] || { echo "$s: message file $f is empty or blank, not sent" >&2; return 6; }
+  # A message that quotes dialog text would make a real dialog impossible to tell apart
+  # from our own paste, and Enter on a dialog can approve it. Such messages are refused.
+  rg -q -- "$DIALOG_TEXT" "$f" && { echo "$s: message quotes permission or trust dialog text, not sent (reword it)" >&2; return 8; }
   tmux has-session -t "$s" 2>/dev/null || { echo "no session $s" >&2; return 2; }
   dialog_kind "$(screen "$s")" >/dev/null && { echo "$s: dialog open, not sent" >&2; return 3; }
   user_typing "$s" && { echo "$s: text in the input line, not sent" >&2; return 4; }
   # Old scrollback may already hold the same line, so delivery means the count goes up.
-  before=$(probe_count "$s" "$probe")
+  before=$(probe_count "$s" "$probe") || { echo "$s: tmux could not read the pane, not sent" >&2; return 7; }
   tmux load-buffer -b fleet "$f" || { echo "$s: tmux load-buffer failed, not sent" >&2; return 7; }
   tmux paste-buffer -p -d -b fleet -t "$s" || { echo "$s: tmux paste-buffer failed, not sent" >&2; tmux delete-buffer -b fleet 2>/dev/null; return 7; }
   sleep 1
-  # Re-check right before Enter: a dialog or someone's typing may have started
-  # during the paste. A dialog line counts only beyond those in the message itself.
-  local re='Do you want to proceed\?|❯ 1\. Yes' in_msg on_screen txt
-  in_msg=$(rg -c "$re" "$f"); on_screen=$(screen "$s" | rg -c "$re")
-  if [ "${on_screen:-0}" -gt "${in_msg:-0}" ]; then
+  # Re-check right before Enter. The message holds no dialog text, so any dialog text now is a real dialog.
+  local txt first
+  if dialog_kind "$(screen "$s")" >/dev/null; then
     # Keys now would go to the dialog, so none are sent.
     echo "$s: a dialog opened during the paste, Enter not pressed. The pasted text may still be in the input line." >&2; return 3; fi
   txt=$(input_text "$s")
-  # Our own paste shows as its first line or as a [Pasted text ...] / [...Truncated text] placeholder.
-  if [ -n "$txt" ] && [[ "$txt" != "${probe:0:10}"* && "$txt" != *"Pasted text"* && "$txt" != *"Truncated text"* ]]; then
+  first=$(rg -m1 '\S' "$f" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+  # The input must hold exactly our paste: its whole first line, or Claude Code's
+  # [Pasted text #N ...] placeholder and nothing else. Anything more is someone's typing.
+  if [ -n "$txt" ] && [ "$txt" != "$first" ] && ! [[ "$txt" =~ ^\[(Pasted\ text|\.\.\.Truncated\ text)\ \#[0-9]+[^]]*\]$ ]]; then
     # C-u clears the input line. Escape would interrupt a working agent and C-c twice exits Claude Code.
     tmux send-keys -t "$s" C-u; sleep 1
     if user_typing "$s"; then echo "$s: other text appeared in the input line during the paste, Enter not pressed. C-u did not clear the input, check the pane." >&2
@@ -89,8 +96,10 @@ paste_file() { local s=$1 f=$2 probe before _
     return 4; fi
   tmux send-keys -t "$s" Enter || { echo "$s: pasted, but tmux could not press Enter" >&2; return 7; }
   # Claude Code can take several seconds to render a long paste after Enter.
+  local now
   for _ in $(seq 1 10); do sleep 1
-    [ "$(probe_count "$s" "$probe")" -gt "$before" ] && { echo "$s: delivered"; return 0; }; done
+    now=$(probe_count "$s" "$probe") || { echo "$s: pasted and Enter pressed, but tmux could not read the pane" >&2; return 7; }
+    [ "$now" -gt "$before" ] && { echo "$s: delivered"; return 0; }; done
   echo "$s: pasted but first line not found in pane" >&2; return 5; }
 
 idle_nudge() { local s=$1
@@ -108,20 +117,25 @@ nudge() { local s=$1
   log "$s nudged (Esc + continue)"; }
 
 # Start claude in session $s (new window if the session exists) and paste prompt file $f.
-launch() { local s=$1 cwd=$2 n=$3 f=$4
-  if tmux has-session -t "$s" 2>/dev/null; then tmux new-window -t "$s" -c "$cwd" -n "agent-$(date +%H%M%S)"
-  else tmux new-session -d -s "$s" -x 200 -y 50 -c "$cwd"; fi
-  tmux send-keys -t "$s" "claude -n \"$n\" ${CLAUDE_ARGS:-}" Enter
+# All keys go to the new pane by id, never to whatever pane happens to be active.
+# On failure LAUNCH_ERR says why and the new pane is closed (its claude, if any, ends unanswered),
+# so a retry is not skipped as "already running".
+launch() { local s=$1 cwd=$2 n=$3 f=$4 pane ok=0 scr
+  LAUNCH_ERR=
+  if tmux has-session -t "$s" 2>/dev/null; then pane=$(tmux new-window -P -F '#{pane_id}' -t "$s" -c "$cwd" -n "agent-$(date +%H%M%S)")
+  else pane=$(tmux new-session -d -P -F '#{pane_id}' -s "$s" -x 200 -y 50 -c "$cwd"); fi
+  [ -n "$pane" ] || { LAUNCH_ERR="tmux could not create a window for $s"; return 4; }
+  launch_fail() { LAUNCH_ERR=$1; tmux kill-pane -t "$pane" 2>/dev/null; return "$2"; }
+  tmux send-keys -t "$pane" "${CLAUDE_BIN:-claude} -n \"$n\" ${CLAUDE_ARGS:-}" Enter || { launch_fail "tmux could not type the claude command" 4; return; }
   # Paste only once Claude Code's UI is up. A shell prompt (starship uses ❯ too) would run the text.
-  # On failure LAUNCH_ERR says why, for the caller's log line.
-  local ok=0 scr; LAUNCH_ERR=; for _ in $(seq 1 45); do sleep 2; scr=$(screen "$s")
+  for _ in $(seq 1 45); do sleep 2; scr=$(screen "$pane")
     if [ "$(dialog_kind "$scr")" = trust ]; then
-      LAUNCH_ERR="workspace trust dialog: open claude once in $cwd by hand and trust it"; return 2; fi
+      launch_fail "workspace trust dialog: open claude once in $cwd by hand and trust it" 2; return; fi
     [ -n "$(claude_pid "$s")" ] && rg -q 'bypass permissions on|for shortcuts' <<<"$scr" && { ok=1; break; }; done
-  [ "$ok" = 1 ] || { LAUNCH_ERR="claude UI not detected after 90 s"; return 1; }
+  [ "$ok" = 1 ] || { launch_fail "claude UI not detected after 90 s" 1; return; }
   sleep 2
-  tmux load-buffer -b wd "$f" && tmux paste-buffer -p -d -b wd -t "$s" || { LAUNCH_ERR="tmux could not paste $f"; return 3; }
-  sleep 2; tmux send-keys -t "$s" Enter || { LAUNCH_ERR="tmux could not press Enter"; return 3; }; }
+  tmux load-buffer -b wd "$f" && tmux paste-buffer -p -d -b wd -t "$pane" || { LAUNCH_ERR="tmux could not paste $f"; return 3; }
+  sleep 2; tmux send-keys -t "$pane" Enter || { LAUNCH_ERR="tmux could not press Enter"; return 3; }; }
 
 # First start of an agent: its prompt file plus autonomy.txt.
 start_agent() { local s=$1 f=$DIR/start-$1.txt
