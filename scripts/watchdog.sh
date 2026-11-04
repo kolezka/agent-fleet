@@ -134,8 +134,9 @@ launch() { local s=$1 cwd=$2 n=$3 f=$4 pane ok=0 scr
     [ -n "$(claude_pid "$s")" ] && rg -q 'bypass permissions on|for shortcuts' <<<"$scr" && { ok=1; break; }; done
   [ "$ok" = 1 ] || { launch_fail "claude UI not detected after 90 s" 1; return; }
   sleep 2
-  tmux load-buffer -b wd "$f" && tmux paste-buffer -p -d -b wd -t "$pane" || { LAUNCH_ERR="tmux could not paste $f"; return 3; }
-  sleep 2; tmux send-keys -t "$pane" Enter || { LAUNCH_ERR="tmux could not press Enter"; return 3; }; }
+  # A claude without its prompt is closed too, so a retry starts it cleanly.
+  tmux load-buffer -b wd "$f" && tmux paste-buffer -p -d -b wd -t "$pane" || { launch_fail "tmux could not paste $f" 3; return; }
+  sleep 2; tmux send-keys -t "$pane" Enter || { launch_fail "tmux could not press Enter" 3; return; }; }
 
 # First start of an agent: its prompt file plus autonomy.txt.
 start_agent() { local s=$1 f=$DIR/start-$1.txt
