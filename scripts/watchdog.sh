@@ -52,20 +52,28 @@ user_typing() { # real (not dim suggestion) text in the input line
   l=$(printf '%s' "$l" | LC_ALL=C sed 's/\xc2\xa0/ /g' | sed -E 's/\x1b\[[0-9;]*m//g; s/^.*❯[[:space:]]*//; s/[[:space:]]+$//')
   [ -n "$l" ]; }
 
+probe_count() { local n; n=$(tmux capture-pane -p -S - -t "$1" 2>/dev/null | rg -cF -- "$2"); echo "${n:-0}"; }
+
 # Paste a file into a session and press Enter. Refuses when the file is blank,
 # a dialog is open or someone is typing. Exit 0 = pasted and its first
-# non-empty line is visible in the pane.
-paste_file() { local s=$1 f=$2 probe _
+# non-empty line shows up in the pane more often than before the paste.
+# Exit 7 = a tmux call failed.
+paste_file() { local s=$1 f=$2 probe before _
   # An empty probe would match any pane, so a blank message is refused.
   probe=$(rg -m1 '\S' "$f" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'); probe=${probe:0:40}
   [ -n "$probe" ] || { echo "$s: message file $f is empty or blank, not sent" >&2; return 6; }
   tmux has-session -t "$s" 2>/dev/null || { echo "no session $s" >&2; return 2; }
   dialog_kind "$(screen "$s")" >/dev/null && { echo "$s: dialog open, not sent" >&2; return 3; }
   user_typing "$s" && { echo "$s: text in the input line, not sent" >&2; return 4; }
-  tmux load-buffer -b fleet "$f" && tmux paste-buffer -p -d -b fleet -t "$s"; sleep 1; tmux send-keys -t "$s" Enter
+  # Old scrollback may already hold the same line, so delivery means the count goes up.
+  before=$(probe_count "$s" "$probe")
+  tmux load-buffer -b fleet "$f" || { echo "$s: tmux load-buffer failed, not sent" >&2; return 7; }
+  tmux paste-buffer -p -d -b fleet -t "$s" || { echo "$s: tmux paste-buffer failed, not sent" >&2; tmux delete-buffer -b fleet 2>/dev/null; return 7; }
+  sleep 1
+  tmux send-keys -t "$s" Enter || { echo "$s: pasted, but tmux could not press Enter" >&2; return 7; }
   # Claude Code can take several seconds to render a long paste after Enter.
   for _ in $(seq 1 10); do sleep 1
-    tmux capture-pane -p -S -400 -t "$s" | rg -qF -- "$probe" && { echo "$s: delivered"; return 0; }; done
+    [ "$(probe_count "$s" "$probe")" -gt "$before" ] && { echo "$s: delivered"; return 0; }; done
   echo "$s: pasted but first line not found in pane" >&2; return 5; }
 
 idle_nudge() { local s=$1
