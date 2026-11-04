@@ -54,20 +54,37 @@ sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum 
 sync_files() { echo fleet.conf; (cd "$LOCAL_DIR" && ls ./*.txt 2>/dev/null | sed 's|^\./||' | rg -v '^(start|replace)-') || true; }
 src_of() { if [ "$1" = watchdog.sh ]; then echo "$PLUGIN_DIR/scripts/watchdog.sh"; else echo "$LOCAL_DIR/$1"; fi; }
 
-# Print the host files that differ from the local copy and from what the last
-# sync wrote (the manifest). Those hold edits made on the host since then.
-sync_conflicts() { local out h n f l sec=host; declare -A H M
-  out=$({ printf 'cd %q 2>/dev/null || exit 0\nfor f in' "$FLEET_DIR"; printf ' %q' "$@"
-          printf '; do [ -f "$f" ] && sha256sum "$f"; done\necho ---\ncat .fleet-sync-manifest 2>/dev/null\nexit 0\n'; } | rx)
+# Measure the host copies: HOST_HASH[file] (sha256 or "absent") and
+# HOST_MANIFEST[file] (what the last sync wrote). Aborts when the host cannot be
+# read. Only a FLEET_DIR that does not exist yet counts as "no host files".
+declare -A HOST_HASH HOST_MANIFEST
+measure_host() { local out rc h n sec=host
+  HOST_HASH=(); HOST_MANIFEST=()
+  out=$({ printf 'd=%q\nset --' "$FLEET_DIR"; printf ' %q' "$@"; printf '\n'; cat <<'EOF2'
+if [ ! -e "$d" ]; then echo "STATE new"; echo END; exit 0; fi
+cd "$d" 2>/dev/null || { echo "cannot read FLEET_DIR $d on the host" >&2; exit 4; }
+echo "STATE present"
+for f in "$@"; do if [ -e "$f" ]; then sha256sum -- "$f" || exit 5; else echo "absent  $f"; fi; done
+echo "--- manifest"
+if [ -e .fleet-sync-manifest ]; then cat .fleet-sync-manifest || exit 5; fi
+echo END
+EOF2
+  } | rx) || { rc=$?; echo "sync aborted: could not read the host files (exit $rc). Nothing was copied." >&2; exit 1; }
+  [ "${out##*$'\n'}" = END ] || { echo "sync aborted: incomplete answer from the host. Nothing was copied." >&2; exit 1; }
   while read -r h n; do
-    [ "$h" = --- ] && { sec=manifest; continue; }
+    case "$h" in STATE|END) continue ;; ---) sec=manifest; continue ;; esac
     [ -n "$n" ] || continue
-    if [ "$sec" = host ]; then H[$n]=$h; else M[$n]=$h; fi
+    if [ "$sec" = host ]; then HOST_HASH[$n]=$h; else HOST_MANIFEST[$n]=$h; fi
   done <<<"$out"
+  for n in "$@"; do [ -n "${HOST_HASH[$n]:-}" ] || HOST_HASH[$n]=absent; done; }
+
+# CONFLICTS: host files that differ from the local copy and from what the last
+# sync wrote. Those hold edits made on the host since then.
+find_conflicts() { local f l; CONFLICTS=(); measure_host "$@"
   for f in "$@"; do
-    [ -n "${H[$f]:-}" ] || continue
+    [ "${HOST_HASH[$f]}" = absent ] && continue
     l=$(sha256 < "$(src_of "$f")" | cut -d' ' -f1)
-    [ "${H[$f]}" = "$l" ] || [ "${H[$f]}" = "${M[$f]:-}" ] || echo "$f"
+    [ "${HOST_HASH[$f]}" = "$l" ] || [ "${HOST_HASH[$f]}" = "${HOST_MANIFEST[$f]:-}" ] || CONFLICTS+=("$f")
   done; }
 
 refuse_conflicts() {
@@ -78,14 +95,13 @@ refuse_conflicts() {
   exit 1; }
 
 # do_sync <force 0|1> <file...>: copy files to FLEET_DIR, refusing to drop host edits unless forced.
-do_sync() { local force=$1 c c_list tmp; shift
+do_sync() { local force=$1 tmp; shift
   if same_dir; then
     [[ " $* " == *" watchdog.sh "* ]] && cp "$PLUGIN_DIR/scripts/watchdog.sh" "$LOCAL_DIR/watchdog.sh"
     echo "FLEET_DIR is the local fleet dir, nothing else to copy"; return 0
   fi
   if [ "$force" != 1 ]; then
-    c=$(sync_conflicts "$@")
-    if [ -n "$c" ]; then mapfile -t c_list <<<"$c"; refuse_conflicts "${c_list[@]}"; fi
+    find_conflicts "$@"; [ ${#CONFLICTS[@]} = 0 ] || refuse_conflicts "${CONFLICTS[@]}"
   fi
   tmp=$(mktemp -d)
   for f in "$@"; do cp "$(src_of "$f")" "$tmp/$f"; done
@@ -229,7 +245,7 @@ EOF
     [[ "$text" != *$'\n'* ]] || { echo "decide takes one line of text" >&2; exit 1; }
     a=$LOCAL_DIR/autonomy.txt; [ -f "$a" ] || { echo "no $a" >&2; exit 1; }
     # Check the guard before touching the local file, so a refusal leaves nothing half done.
-    if ! same_dir; then c=$(sync_conflicts autonomy.txt); [ -z "$c" ] || refuse_conflicts autonomy.txt; fi
+    if ! same_dir; then find_conflicts autonomy.txt; [ ${#CONFLICTS[@]} = 0 ] || refuse_conflicts autonomy.txt; fi
     last=$(rg -o '^(\d+)\.' -r '$1' "$a" | sort -n | tail -1) || last=
     rule="$(( ${last:-0} + 1 )). Decision from the owner ($(date -u +%FT%TZ), relayed by the supervisor): $text"
     [ -s "$a" ] && [ -n "$(tail -c1 "$a")" ] && echo >> "$a"
