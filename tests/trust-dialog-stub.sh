@@ -3,7 +3,9 @@
 # Stub test for findings 8 and 9. Runs on the host in a scratch dir; never launches claude.
 # Usage: trust-dialog-stub.sh <dir with watchdog.sh>
 set -u
-D=$1; S=fleetsmoke-trust-$$; fails=0
+D=${1:?usage: trust-dialog-stub.sh <scratch dir named fleetsmoke-*>}; S=fleetsmoke-trust-$$; fails=0
+# This script deletes $D on exit, so only accept a scratch dir (checked before the trap is set).
+[[ "$(basename "$D")" == fleetsmoke-* ]] || { echo "refusing: $D is not a fleetsmoke-* scratch dir" >&2; exit 9; }
 pass() { echo "PASS $*"; }; fail() { echo "FAIL $*"; fails=$((fails+1)); }
 cleanup() { tmux kill-session -t "$S" 2>/dev/null; rm -rf "$D"; }
 trap cleanup EXIT
