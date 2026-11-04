@@ -45,12 +45,12 @@ deny_dialog() { local s=$1 k=$2
   dialog_kind "$(screen "$s")" >/dev/null && tmux send-keys -t "$s" Escape
   log "$s DENIED $k permission dialog (hard limit or unattended)"; }
 
-user_typing() { # real (not dim suggestion) text in the input line
+input_text() { # the text in the input line; empty when it is empty or shows a dim suggestion
   local l; l=$(tmux capture-pane -p -e -t "$1" | rg '❯' | tail -1)
-  [[ "$l" == *$'\e[2m'* ]] && return 1
+  [[ "$l" == *$'\e[2m'* ]] && return 0
   # Claude Code pads the empty prompt with a no-break space; [[:space:]] misses it.
-  l=$(printf '%s' "$l" | LC_ALL=C sed 's/\xc2\xa0/ /g' | sed -E 's/\x1b\[[0-9;]*m//g; s/^.*❯[[:space:]]*//; s/[[:space:]]+$//')
-  [ -n "$l" ]; }
+  printf '%s' "$l" | LC_ALL=C sed 's/\xc2\xa0/ /g' | sed -E 's/\x1b\[[0-9;]*m//g; s/^.*❯[[:space:]]*//; s/[[:space:]]+$//'; }
+user_typing() { [ -n "$(input_text "$1")" ]; } # real (not dim suggestion) text in the input line
 
 probe_count() { local n; n=$(tmux capture-pane -p -S - -t "$1" 2>/dev/null | rg -cF -- "$2"); echo "${n:-0}"; }
 
@@ -70,6 +70,21 @@ paste_file() { local s=$1 f=$2 probe before _
   tmux load-buffer -b fleet "$f" || { echo "$s: tmux load-buffer failed, not sent" >&2; return 7; }
   tmux paste-buffer -p -d -b fleet -t "$s" || { echo "$s: tmux paste-buffer failed, not sent" >&2; tmux delete-buffer -b fleet 2>/dev/null; return 7; }
   sleep 1
+  # Re-check right before Enter: a dialog or someone's typing may have started
+  # during the paste. A dialog line counts only beyond those in the message itself.
+  local re='Do you want to proceed\?|❯ 1\. Yes' in_msg on_screen txt
+  in_msg=$(rg -c "$re" "$f"); on_screen=$(screen "$s" | rg -c "$re")
+  if [ "${on_screen:-0}" -gt "${in_msg:-0}" ]; then
+    # Keys now would go to the dialog, so none are sent.
+    echo "$s: a dialog opened during the paste, Enter not pressed. The pasted text may still be in the input line." >&2; return 3; fi
+  txt=$(input_text "$s")
+  # Our own paste shows as its first line or as a [Pasted text ...] / [...Truncated text] placeholder.
+  if [ -n "$txt" ] && [[ "$txt" != "${probe:0:10}"* && "$txt" != *"Pasted text"* && "$txt" != *"Truncated text"* ]]; then
+    # C-u clears the input line. Escape would interrupt a working agent and C-c twice exits Claude Code.
+    tmux send-keys -t "$s" C-u; sleep 1
+    if user_typing "$s"; then echo "$s: other text appeared in the input line during the paste, Enter not pressed. C-u did not clear the input, check the pane." >&2
+    else echo "$s: other text appeared in the input line during the paste, Enter not pressed, input cleared with C-u (including the other text)." >&2; fi
+    return 4; fi
   tmux send-keys -t "$s" Enter || { echo "$s: pasted, but tmux could not press Enter" >&2; return 7; }
   # Claude Code can take several seconds to render a long paste after Enter.
   for _ in $(seq 1 10); do sleep 1

@@ -44,7 +44,7 @@ new_fleet() { local n=$1 stub=$2 rows=() s; shift 2
 fleet() { OUT=$(cd "$D/loc" && FLEET_CONF="$D/loc/fleet.conf" "$P/scripts/fleet" "$@" 2>&1); RC=$?; }
 reset_stub() { rm -f "$STUB_COUNT"; }
 session() { "$REAL_TMUX" new-session -d -s "$1" -x 200 -y 50 "$2"; }
-pane_has() { "$REAL_TMUX" capture-pane -p -S - -t "=$1" | rg -qF -- "$2"; }
+pane_has() { "$REAL_TMUX" capture-pane -p -S - -t "=$1:" | rg -qF -- "$2"; }
 
 # 1. A failed host hash query must abort the sync, not read as "no host files".
 new_fleet f1 1; fleet sync
@@ -101,6 +101,15 @@ fleet send f7a "$D/m.txt"; sleep 2
 if [ "$RC" = 3 ] && ! pane_has f7a GOT-ENTER; then pass "7 dialog during the paste: no Enter (exit $RC)"; else fail "7 dialog during the paste: no Enter (exit $RC)"; show; fi
 fleet send f7b "$D/m.txt"; sleep 2
 if [ "$RC" = 4 ] && ! pane_has f7b GOT-ENTER; then pass "7 typing during the paste: no Enter (exit $RC)"; else fail "7 typing during the paste: no Enter (exit $RC)"; show; fi
+# Positive control for the GOT-ENTER probe: an Enter by hand must show up.
+"$REAL_TMUX" send-keys -t "=f7b:" Enter; sleep 1
+if pane_has f7b GOT-ENTER; then pass "7 control: the GOT-ENTER probe sees a real Enter"; else fail "7 control: the GOT-ENTER probe sees a real Enter"; fi
+
+# Without echo the pane shows the line once, like Claude Code's input line.
+session f7c "stty -echo; cat"
+new_fleet f7q 0 f7c; fleet sync
+printf 'f7 quoting: Do you want to proceed?\n' > "$D/m.txt"; fleet send f7c "$D/m.txt"
+if [ "$RC" = 0 ]; then pass "7 a message that quotes the dialog text still delivers (exit $RC)"; else fail "7 a message that quotes the dialog text still delivers (exit $RC)"; show; fi
 
 echo "failures: $FAILS"
 [ "$FAILS" = 0 ]
