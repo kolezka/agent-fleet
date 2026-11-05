@@ -36,4 +36,21 @@ fleet handoff sup-2                            # HANDOFF-sup-2.md draft with liv
 
 ## Install
 
-Add this repo as a marketplace in Claude Code, then install `agent-fleet`. During development you can also load it from the local path.
+The two machines need different things. The supervisor runs the CLI and the skill. The agents need phased-delivery, and `fleet sync` delivers the watchdog.
+
+| What | Supervisor machine (e.g. your Mac) | Agent host |
+|---|---|---|
+| `agent-fleet` plugin | Install it. It gives the skill and `scripts/fleet`. | Not needed. Agents do not supervise. |
+| `phased-delivery` plugin | Only if you also run phased work in this session. | Install it in the agents' Claude config dir (`CLAUDE_CONFIG_DIR` if set). Each agent uses it, and a replaced agent resumes from its `run.md`. |
+| `watchdog.sh`, prompts, `autonomy.txt` | Edit them in the local fleet dir. | `fleet sync` copies them to `FLEET_DIR`. Do not install them by hand. |
+| Tools | bash, ssh with a key to the host (BatchMode). `tmux` and `rg` for `scripts/test-local.sh`. | Linux, bash 4+, tmux, ripgrep, GNU coreutils, Claude Code. |
+| One-time step | None. | Open `claude` once in `AGENT_CWD` and answer the workspace trust question. `fleet start` refuses until this is done. |
+
+Steps:
+
+1. On the supervisor machine, add the `kolezka` marketplace (github `kolezka/marketplace`) in Claude Code if it is not there yet, then install `agent-fleet`. This repo is private, so installing needs Git access to it.
+2. On the agent host, as the user the agents run as, install `phased-delivery` from the same marketplace into the config dir the agents use.
+3. On the agent host, trust `AGENT_CWD` once by hand, as in the table.
+4. Back on the supervisor machine: `fleet init`, `fleet sync`, `fleet watchdog dry`, then `fleet start`. See Quick start.
+
+During development you can load the plugin from a local checkout instead of the marketplace.
