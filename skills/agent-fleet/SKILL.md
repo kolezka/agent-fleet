@@ -40,6 +40,8 @@ Arm a Monitor with the output of `fleet monitor-cmd`, timeout 30 min, and re-arm
 
 ## 3. Talk to an agent
 
+To watch an agent live, `fleet attach <session>`. The fleet runs on its own tmux server (`tmux -L fleet-<FLEET>`), so plain `tmux ls` and `tmux attach` do not see it. Local and remote fleets work the same way; only `REMOTE_SSH` in `fleet.conf` differs.
+
 Write the message to a local file, then `fleet send <session> <file>`. It refuses to paste when a permission dialog is open (exit 3) or there is real typed text in the input line (exit 4). It refuses a blank file (exit 6) and a message that quotes permission or trust dialog text (exit 8, reword it), stops before Enter if a dialog or typed text shows up during the paste, and confirms delivery by finding the first non-empty line in the pane (exit 5 if missing, exit 7 if a tmux call failed). `fleet broadcast <file>` sends one file to every agent and prints one line per agent. Rules:
 
 - Relay only decisions the owner actually made. Quote the owner's decision and the time, and name yourself as the relaying session.
