@@ -41,6 +41,8 @@ load_conf() {
 # function that targets the fleet's own tmux server.
 rx() {
   { printf '%s\n' 'command -v sha256sum >/dev/null 2>&1 || sha256sum() { [ "${1:-}" = -- ] && shift; shasum -a 256 "$@"; }'
+    # Send the socket the CLI chose (empty included), so watchdog.sh sourced on the host picks the same server.
+    printf 'export FLEET_TMUX_SOCKET=%q\n' "${FLEET_TMUX_SOCKET:-}"
     if [ -n "${FLEET_TMUX_SOCKET:-}" ]; then printf 'tmux() { command tmux -L %q -f /dev/null "$@"; }\n' "$FLEET_TMUX_SOCKET"; fi
     cat; } |
   if [ -z "${REMOTE_SSH:-}" ]; then bash -s
@@ -359,6 +361,9 @@ EOF
   attach)
     # Interactive: attach this terminal to an agent's tmux session (detach with the tmux prefix + d).
     load_conf; s=${1:?usage: fleet attach <session>}
+    # The remote command is nested in ssh and su quoting, so names are kept to plain characters.
+    for v in "$s" "${FLEET_TMUX_SOCKET:-x}"; do
+      [[ "$v" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "fleet attach supports names made of letters, digits, '.', '_' and '-' only, got: $v" >&2; exit 1; }; done
     t=(tmux); [ -n "$FLEET_TMUX_SOCKET" ] && t+=(-L "$FLEET_TMUX_SOCKET")
     if [ -z "${REMOTE_SSH:-}" ]; then exec "${t[@]}" attach -t "$s"; fi
     cmd=$(printf '%q ' "${t[@]}" attach -t "$s")
