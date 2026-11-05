@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Smoke test of the fleet CLI against a real Linux host, with a scratch fleet.
-# Usage: scripts/smoke-test.sh <REMOTE_SSH> [REMOTE_USER] [HOST_BASE_DIR]
+# Smoke test of the fleet CLI against a real host (Linux or macOS) or this machine ("local"), with a scratch fleet.
+# Usage: scripts/smoke-test.sh <REMOTE_SSH|local> [REMOTE_USER] [HOST_BASE_DIR]
 # Every name it creates starts with fleetsmoke-<random>. It never starts claude
 # (no `fleet start`, no `fleet watchdog start`), and it removes its scratch tmux
 # sessions and dirs on exit.
 set -uo pipefail
-REMOTE_SSH=${1:?usage: scripts/smoke-test.sh <REMOTE_SSH> [REMOTE_USER] [HOST_BASE_DIR]}
+REMOTE_SSH=${1:?usage: scripts/smoke-test.sh <REMOTE_SSH|local> [REMOTE_USER] [HOST_BASE_DIR]}
+# "local" tests the one-machine setup: agents, watchdog and supervisor on this machine, no ssh.
+[ "$REMOTE_SSH" = local ] && REMOTE_SSH=
 REMOTE_USER=${2:-}; BASE=${3:-/tmp}
 FLEET_BIN=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fleet
 ID=fleetsmoke-$RANDOM$RANDOM
@@ -14,8 +16,11 @@ A=$ID-a; B=$ID-b; DLG=$ID-dlg; MISSING=$ID-missing
 LOCAL=$(mktemp -d "${TMPDIR:-/tmp}/fleetsmoke-XXXXXX") || exit 1
 FAILS=0
 
-rx() {
-  if [ -n "$REMOTE_USER" ]; then $REMOTE_SSH "su - $REMOTE_USER -c 'bash -s'"
+# Scratch sessions go on the fleet's own tmux server (fleet-<FLEET>), like the CLI's.
+rx() { { printf 'tmux() { command tmux -L %q -f /dev/null "$@"; }\n' "fleet-$ID"; cat; } | rx_raw; }
+rx_raw() {
+  if [ -z "$REMOTE_SSH" ]; then bash -s
+  elif [ -n "$REMOTE_USER" ]; then $REMOTE_SSH "su - $REMOTE_USER -c 'bash -s'"
   else $REMOTE_SSH 'bash -s'; fi
 }
 

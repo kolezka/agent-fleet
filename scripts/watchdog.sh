@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agent-fleet watchdog. Runs on the agent host (Linux: GNU date, /proc, ps --ppid).
+# agent-fleet watchdog. Runs on the agent host, Linux or macOS (bash 4+, tmux, rg).
 # Reads fleet.conf from its own directory and checks every agent every 60 s.
 # Hung = spinner visible, screen unchanged apart from the timer, no tool process,
 # for 3 checks (10 while "thinking"), or claude is gone. Recovery: Esc + nudge,
@@ -7,13 +7,24 @@
 # Usage: watchdog.sh [--once] [--dry] [--quiet-start]. Sourcing it loads the
 # helpers only (used by `fleet send`, `fleet start`, `fleet status`).
 set -u
+# macOS ships bash 3.2, which has no associative arrays. Use a newer bash (Homebrew) there.
+[ "${BASH_VERSINFO[0]}" -ge 4 ] || { echo "watchdog.sh needs bash 4+, this is $BASH_VERSION (on macOS: brew install bash)" >&2; return 2 2>/dev/null || exit 2; }
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=/dev/null
 . "$DIR/fleet.conf"
 [ -n "${CLAUDE_CONFIG_DIR:-}" ] && export CLAUDE_CONFIG_DIR
+# The fleet runs on its own tmux server without the user's tmux config, so hooks there
+# (extra sidebar panes, focus changes) cannot put the watchdog on the wrong pane.
+# FLEET_TMUX_SOCKET= (set but empty) uses the default server instead.
+FLEET_TMUX_SOCKET=${FLEET_TMUX_SOCKET-fleet-${FLEET:-default}}
+tmux() { if [ -n "$FLEET_TMUX_SOCKET" ]; then command tmux -L "$FLEET_TMUX_SOCKET" -f /dev/null "$@"; else command tmux "$@"; fi; }
 LOG=$DIR/watchdog.log
 ONCE=0; DRY=0; QUIET=0
-END_TS=$(date -d "${END_AT:-2100-01-01T00:00:00Z}" +%s)
+# Portable helpers: GNU tools on Linux, BSD tools on macOS (no GNU coreutils needed).
+to_epoch() { date -d "$1" +%s 2>/dev/null || date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s; }
+pid_cwd() { if [ -d "/proc/$1" ]; then readlink "/proc/$1/cwd"; else lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'; fi; }
+disk_avail_g() { df -Pk "$1" | awk 'NR==2 { print int($4 / 1048576) }'; }
+END_TS=$(to_epoch "${END_AT:-2100-01-01T00:00:00Z}") || { echo "END_AT must look like 2026-11-06T06:00:00Z, got ${END_AT:-}" >&2; return 2 2>/dev/null || exit 2; }
 CTX_MAX=${CTX_MAX:-85}
 for a in "$@"; do case "$a" in --once) ONCE=1;; --dry) DRY=1;; --quiet-start) QUIET=1;; esac; done
 declare -A NAME PROMPT SIG STRIKE NUDGED REPL STATE WAIT IDLE_NUDGED WORKRUN LASTNUDGE DIALOG ROT
@@ -28,12 +39,14 @@ claude_pid() { # newest claude process in the session's panes
   local pp; for pp in $(tmux list-panes -s -t "$1" -F '#{pane_pid}' 2>/dev/null); do
     pgrep -P "$pp" -f '^claude ' ; done | tail -1; }
 tool_running() { # a shell or build under claude that is not an MCP server
-  local d; d=$(ps -o pid=,args= --ppid "$1" 2>/dev/null | rg -v "${TOOL_IGNORE:-mcp|codegraph serve|hindsight|npm exec|npx -y|caffeinate}") || return 1
+  # pgrep -P plus ps -p works on Linux and macOS (macOS ps has no --ppid).
+  local kids d; kids=$(pgrep -P "$1" | paste -sd, -); [ -n "$kids" ] || return 1
+  d=$(ps -o pid=,args= -p "$kids" 2>/dev/null | rg -v "${TOOL_IGNORE:-mcp|codegraph serve|hindsight|npm exec|npx -y|caffeinate}") || return 1
   [ -n "$d" ]; }
 screen() { tmux capture-pane -p -t "$1" 2>/dev/null; }
 working_line() { rg -m1 '…\s\((\d+h\s)?(\d+m\s)?\d+s' <<<"$1"; }
 signature() { rg -v 'Reset:|Cost:|No credentials|t/s|^\s*$' <<<"$1" \
-  | sed -E 's/\((([0-9]+h )?([0-9]+m )?[0-9]+s)( ·|\))/(T\4/' | md5sum | cut -c1-12; }
+  | sed -E 's/\((([0-9]+h )?([0-9]+m )?[0-9]+s)( ·|\))/(T\4/' | cksum | cut -d' ' -f1; }
 
 dialog_kind() { # prints trust|protected|other when a dialog is open
   local scr=$1
@@ -148,7 +161,7 @@ start_agent() { local s=$1 f=$DIR/start-$1.txt
 replace() { local s=$1 pid=$2 why="hung and was stopped by the watchdog" cwd
   [ "${3:-}" = context ] && why="was retired by the watchdog because its context window was nearly full, after it confirmed its run file and handoff are current"
   cwd=${AGENT_CWD:-$HOME}
-  [ -n "$pid" ] && [ -d "/proc/$pid/cwd" ] && cwd=$(readlink -f "/proc/$pid/cwd")
+  if [ -n "$pid" ]; then local c; c=$(pid_cwd "$pid"); [ -d "$c" ] && cwd=$c; fi
   [ "$DRY" = 1 ] && { log "$s DRY would kill pid ${pid:-none} and start a replacement in $cwd"; return; }
   [ -n "$pid" ] && kill "$pid" 2>/dev/null; sleep 5; [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
   REPL[$s]=$(( ${REPL[$s]:-0} + 1 )); printf '%s\n' "${REPL[$s]}" > "$DIR/.repl-$s"
@@ -223,7 +236,7 @@ while :; do
   [ "$(date +%s)" -ge "$END_TS" ] && { log "watchdog end time reached, exiting (agents keep running)"; exit 0; }
   TICK=$((TICK+1))
   if [ $((TICK % 10)) = 1 ]; then
-    avail=$(df -BG --output=avail "${DISK_PATH:-/}" | tail -1 | tr -dc 0-9); log "disk avail=${avail}G"
+    avail=$(disk_avail_g "${DISK_PATH:-/}"); log "disk avail=${avail}G"
     if [ "${avail:-999}" -lt "${DISK_MIN_G:-40}" ] && [ $(( $(date +%s) - LOWDISK_AT )) -ge 21600 ] && [ "$DRY" = 0 ]; then
       LOWDISK_AT=$(date +%s); log "LOWDISK ${avail}G, asking agents to clean up"
       for s in "${SESSIONS[@]}"; do

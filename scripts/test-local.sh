@@ -8,6 +8,9 @@ P=$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)
 T=$(mktemp -d "${TMPDIR:-/tmp}/fleetsmoke-local-XXXXXX") || exit 1
 unset TMUX
 export TMUX_TMPDIR=$T/tmux LC_ALL=${LC_ALL:-en_US.UTF-8}
+# These checks drive one private default server under TMUX_TMPDIR, so the fleet must use it too.
+# The fleet's own-server mode is covered by smoke-test.sh and tests/trust-dialog-stub.sh.
+export FLEET_TMUX_SOCKET=
 mkdir -p "$TMUX_TMPDIR" "$T/bin" "$T/tmuxfail"
 REAL_TMUX=$(command -v tmux)
 SOCK=$TMUX_TMPDIR/tmux-$(id -u)/default
