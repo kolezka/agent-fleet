@@ -316,7 +316,9 @@ EOF
       echo "decision NOT recorded: the sync failed (exit $rc), so the local autonomy.txt was restored to its previous content and nothing was broadcast" >&2
       exit "$rc"; fi
     rm -f "$keep"
-    msg=$(mktemp); printf '%s\n' "$rule" > "$msg"
+    # The broadcast must not start with a digit: if a dialog opened in the moment
+    # before the paste, a leading "1" could pick its first option.
+    msg=$(mktemp); printf 'New rule %s, added to autonomy.txt: %s\n' "$(( ${last:-0} + 1 ))" "${rule#*. }" > "$msg"
     rc=0; do_broadcast "$msg" || rc=$?
     rm -f "$msg"; exit "$rc" ;;
   status)

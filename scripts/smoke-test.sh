@@ -107,6 +107,8 @@ if rg -q "^1\. Decision from the owner \(.*relayed by the supervisor\): smoke de
 fleet decide "smoke decision two $ID"; check "decide 2" 0 "$A: delivered (exit 0)"
 if rg -q "^2\. Decision from the owner .*: smoke decision two $ID\$" "$LOCAL/autonomy.txt"; then pass "decide 2 appended rule 2"; else fail "decide 2 appended rule 2"; fi
 if host_has "$HOST_DIR/autonomy.txt" "^2\. Decision from the owner .*smoke decision two"; then pass "decide synced the rule to the host"; else fail "decide synced the rule to the host"; fi
+# The broadcast text must not start with a digit (a "1" could pick a dialog's first option).
+if printf 'cd %q && f=$(ls -t msg-*-broadcast.txt | head -1) && head -1 "$f" | rg -q "^New rule 2, added to autonomy.txt: Decision from the owner .*smoke decision two"\n' "$HOST_DIR" | rx; then pass "decide broadcast starts with words, not a digit"; else fail "decide broadcast starts with words, not a digit"; fi
 
 left=$(printf 'ls -A %q | rg "^\\.fleet-sync-" | rg -v "^\\.fleet-sync-manifest\$" || true\n' "$HOST_DIR" | rx)
 if [ -z "$left" ]; then pass "no sync temp dir left on the host"; else fail "sync temp dirs left on the host: $left"; fi
