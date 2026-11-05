@@ -1,6 +1,6 @@
 # Watchdog
 
-`scripts/watchdog.sh` runs on the agent host. It needs Linux (GNU `date -d`, `/proc`, `ps --ppid`, `md5sum`), plus `tmux` and `rg`. It reads `fleet.conf` from its own directory.
+`scripts/watchdog.sh` runs on the agent host. It runs on Linux or macOS and needs bash 4+, `tmux` and `rg`. It uses a tmux server of its own (`tmux -L fleet-<FLEET>`, no user config) unless `FLEET_TMUX_SOCKET=` is empty. It reads `fleet.conf` from its own directory.
 
 ## What it detects, per agent, every 60 s
 

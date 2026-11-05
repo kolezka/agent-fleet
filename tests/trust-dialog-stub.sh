@@ -46,9 +46,9 @@ pgrep -f "$D/claude-stub" >/dev/null && fail "stub process still running" || pas
 tmux send-keys -t "$S" -l "$TRUST_TEXT"; tmux send-keys -t "$S" Enter; sleep 1
 k=$(dialog_kind "$(screen "$S")"); [ "$k" = trust ] && pass "dialog_kind=trust" || fail "dialog_kind=$k want trust"
 claude_pid() { echo 999999; }
-before=$(tmux capture-pane -p -t "$S" | md5sum)
+before=$(tmux capture-pane -p -t "$S" | cksum)
 DIALOG[$S]=5; check "$S"; sleep 3
-after=$(tmux capture-pane -p -t "$S" | md5sum)
+after=$(tmux capture-pane -p -t "$S" | cksum)
 rg -q "$S state=dialog kind=trust" watchdog.log && pass "check logs kind=trust" || fail "no kind=trust log"
 rg -q "$S DENIED" watchdog.log && fail "watchdog denied the trust dialog" || pass "not denied"
 [ "$before" = "$after" ] && pass "nothing typed into the pane" || fail "pane changed"

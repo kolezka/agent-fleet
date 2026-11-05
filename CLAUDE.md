@@ -1,11 +1,11 @@
 # agent-fleet
 
-A Claude Code plugin for supervising a fleet of autonomous Claude Code agents. The agents run in tmux on a Linux host. See `README.md` for what it does and `skills/agent-fleet/SKILL.md` for the supervisor workflow.
+A Claude Code plugin for supervising a fleet of autonomous Claude Code agents. The agents run in tmux on a Linux or macOS host, or on this machine. See `README.md` for what it does and `skills/agent-fleet/SKILL.md` for the supervisor workflow.
 
 ## Layout
 
 - `scripts/fleet`: the CLI. It runs on the supervisor machine (macOS or Linux) and reaches the host through `rx` (bash script over stdin, optional `su - REMOTE_USER`).
-- `scripts/watchdog.sh`: runs on the agent host only (Linux: GNU `date -d`, `/proc`, `ps --ppid`, `md5sum`). When sourced it loads the helpers and returns before the loop. `fleet send`, `fleet start` and `fleet status` depend on that.
+- `scripts/watchdog.sh`: runs on the agent host only, Linux or macOS with bash 4+. Tools that differ between the two go through its portable helpers (`to_epoch`, `pid_cwd`, `disk_avail_g`, `tool_running`); do not add GNU-only flags. When sourced it loads the helpers and returns before the loop. `fleet send`, `fleet start` and `fleet status` depend on that.
 - `scripts/smoke-test.sh`: the smoke test against a real host (see below).
 - `scripts/test-local.sh`: local checks with a stub ssh and a private tmux server. Add a check there for every bug fix.
 - `templates/`: files copied by `fleet init`. `fleet.conf` is sourced by bash on both sides, so it must stay valid bash.
@@ -31,7 +31,7 @@ jq . .claude-plugin/*.json >/dev/null
 rg -n '\x{2013}|\x{2014}' .   # must find nothing: no en or em dashes anywhere
 ```
 
-A behaviour change also needs a smoke test on a real Linux host with a scratch fleet:
+A behaviour change also needs a smoke test on a real Linux host with a scratch fleet, and `scripts/smoke-test.sh local` plus `tests/*.sh` on macOS:
 
 ```sh
 scripts/smoke-test.sh "<REMOTE_SSH>" [REMOTE_USER] [HOST_BASE_DIR]

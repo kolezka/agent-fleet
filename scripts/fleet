@@ -16,6 +16,7 @@ fleet decide "<text>"         add an owner decision as the next numbered rule in
                               sync autonomy.txt and broadcast the rule to every agent
 fleet status                  tmux sessions, last watchdog state per agent, context %
 fleet screen <session> [n]    last n lines (default 40) of an agent's screen
+fleet attach <session>        attach this terminal to an agent (the fleet has its own tmux server)
 fleet watchdog start|stop|dry run the watchdog in tmux session <FLEET>-watchdog, or one dry check
 fleet log [n]                 last n lines of watchdog.log
 fleet monitor-cmd             print the Monitor command for the supervisor session
@@ -31,10 +32,19 @@ load_conf() {
   # shellcheck source=/dev/null
   . "$CONF"
   : "${FLEET:?FLEET missing in fleet.conf}" "${FLEET_DIR:?FLEET_DIR missing in fleet.conf}"
+  # Same rule as watchdog.sh: the fleet's own tmux server unless set to empty.
+  FLEET_TMUX_SOCKET=${FLEET_TMUX_SOCKET-fleet-$FLEET}
 }
 
 # Run a bash script (stdin) on the agent host as the agent user. Stdin avoids quoting layers.
+# Each script first gets a sha256sum stand-in (stock macOS has only shasum) and a tmux
+# function that targets the fleet's own tmux server.
 rx() {
+  { printf '%s\n' 'command -v sha256sum >/dev/null 2>&1 || sha256sum() { [ "${1:-}" = -- ] && shift; shasum -a 256 "$@"; }'
+    # Send the socket the CLI chose (empty included), so watchdog.sh sourced on the host picks the same server.
+    printf 'export FLEET_TMUX_SOCKET=%q\n' "${FLEET_TMUX_SOCKET:-}"
+    if [ -n "${FLEET_TMUX_SOCKET:-}" ]; then printf 'tmux() { command tmux -L %q -f /dev/null "$@"; }\n' "$FLEET_TMUX_SOCKET"; fi
+    cat; } |
   if [ -z "${REMOTE_SSH:-}" ]; then bash -s
   elif [ -n "${REMOTE_USER:-}" ]; then $REMOTE_SSH "su - $REMOTE_USER -c 'bash -s'"
   else $REMOTE_SSH 'bash -s'; fi
@@ -221,7 +231,8 @@ EOF
   echo; echo "## 4. Owner decisions"; echo
   echo "(each decision with its time and the message files it went out in; mark agent decisions and supervisor suggestions as such)"
   echo; echo "Message files on the host (UTC):"; echo
-  printf 'cd %q || exit 1\nTZ=UTC ls -l --time-style=+%%FT%%TZ msg-*.txt 2>/dev/null | awk '"'"'{print "- " $6 " " $7}'"'"'\n' "$FLEET_DIR" | rx || true
+  # date -r FILE prints a file's mtime with both GNU and BSD date (ls --time-style is GNU only).
+  printf 'cd %q || exit 1\nfor f in msg-*.txt; do [ -e "$f" ] && echo "- $(TZ=UTC date -r "$f" +%%FT%%TZ) $f"; done\n' "$FLEET_DIR" | rx || true
   for t in "5. Verified state" "6. Pending" "7. Human steps" "8. Warnings" "9. Transcript"; do printf '\n## %s\n\n' "$t"; done
   }
 
@@ -338,7 +349,8 @@ EOF
   watchdog)
     load_conf; sub=${1:-}
     case "$sub" in
-      start) printf 'cd %q && tmux has-session -t %q 2>/dev/null && { echo "already running"; exit 0; }; tmux new-session -d -s %q -c %q "bash watchdog.sh --quiet-start" && echo started\n' \
+      # On macOS caffeinate keeps the machine awake while the watchdog runs, so agents are not paused by sleep.
+      start) printf 'cd %q && tmux has-session -t %q 2>/dev/null && { echo "already running"; exit 0; }; c="bash watchdog.sh --quiet-start"; [ "$(uname)" = Darwin ] && c="caffeinate -i $c"; tmux new-session -d -s %q -c %q "$c" && echo "started: $c"\n' \
                "$FLEET_DIR" "$FLEET-watchdog" "$FLEET-watchdog" "$FLEET_DIR" | rx ;;
       stop)  printf 'tmux kill-session -t %q && echo stopped\n' "$FLEET-watchdog" | rx ;;
       dry)   printf 'cd %q && bash watchdog.sh --once --dry\n' "$FLEET_DIR" | rx ;;
@@ -346,6 +358,17 @@ EOF
     esac ;;
   log)
     load_conf; printf 'tail -n %q %q/watchdog.log\n' "${1:-30}" "$FLEET_DIR" | rx ;;
+  attach)
+    # Interactive: attach this terminal to an agent's tmux session (detach with the tmux prefix + d).
+    load_conf; s=${1:?usage: fleet attach <session>}
+    # The remote command is nested in ssh and su quoting, so names are kept to plain characters.
+    for v in "$s" "${FLEET_TMUX_SOCKET:-x}"; do
+      [[ "$v" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "fleet attach supports names made of letters, digits, '.', '_' and '-' only, got: $v" >&2; exit 1; }; done
+    t=(tmux); [ -n "$FLEET_TMUX_SOCKET" ] && t+=(-L "$FLEET_TMUX_SOCKET")
+    if [ -z "${REMOTE_SSH:-}" ]; then exec "${t[@]}" attach -t "$s"; fi
+    cmd=$(printf '%q ' "${t[@]}" attach -t "$s")
+    # shellcheck disable=SC2086 # REMOTE_SSH is a command line by design
+    if [ -n "${REMOTE_USER:-}" ]; then exec $REMOTE_SSH -t "su - $REMOTE_USER -c '$cmd'"; else exec $REMOTE_SSH -t "$cmd"; fi ;;
   monitor-cmd)
     load_conf; monitor_cmd ;;
   handoff)
