@@ -116,5 +116,22 @@ printf 'f7 quoting: Do you want to proceed?\n' > "$D/m.txt"; fleet send f7c "$D/
 if [ "$RC" = 8 ]; then pass "7 a message that quotes dialog text is refused (exit $RC)"; else fail "7 a message that quotes dialog text is refused (exit $RC, want 8)"; show; fi
 if pane_has f7c 'f7 quoting'; then fail "7 the refused quote message was pasted anyway"; else pass "7 the refused quote message was not pasted"; fi
 
+# 8. A read-only viewer on the server must not block keys. tmux refuses send-keys
+# from outside while any read-only client is attached, even to another session.
+# Without echo the message only shows up once Enter ends the read.
+session f8a "stty -echo; IFS= read -r a; printf '%s\nGOT-ENTER\n' \"\$a\"; cat"
+session f8b "stty raw -echo; head -c 4 | od -An -tx1; cat"
+new_fleet f8 0 f8a f8b; fleet sync
+session f8v "unset TMUX; cd $(printf %q "$D/loc") && FLEET_CONF=$(printf %q "$D/loc/fleet.conf") $(printf %q "$P/scripts/fleet") attach --read-only f8a"
+sleep 1
+if "$REAL_TMUX" list-clients -F '#{client_flags}' | rg -q 'read-only'; then pass "8 control: a read-only viewer is attached"; else fail "8 control: a read-only viewer is attached"; fi
+if "$REAL_TMUX" send-keys -t "=f8b:" x 2>/dev/null; then fail "8 control: send-keys is refused with the viewer on (tmux behaviour changed?)"; else pass "8 control: send-keys is refused with the viewer on"; fi
+printf 'f8 message\n' > "$D/m.txt"; fleet send f8a "$D/m.txt"; sleep 1
+if [ "$RC" = 0 ] && pane_has f8a GOT-ENTER; then pass "8 send presses Enter with a read-only viewer on (exit $RC)"; else fail "8 send presses Enter with a read-only viewer on (exit $RC)"; show; fi
+# Escape, C-u, a digit and Enter must arrive as exactly these bytes.
+OUT=$(FLEET_TMUX_SOCKET='' bash -c '. "$1" || exit 9; for k in $'"'"'\e'"'"' $'"'"'\025'"'"' 2 $'"'"'\r'"'"'; do keys "=f8b:" "$k" || exit 8; done' _ "$D/host/watchdog.sh" 2>&1); RC=$?; sleep 1
+if [ "$RC" = 0 ] && pane_has f8b '1b 15 32 0d'; then pass "8 keys sends Escape, C-u, 2 and Enter as raw bytes (exit $RC)"; else fail "8 keys sends Escape, C-u, 2 and Enter as raw bytes (exit $RC)"; show; "$REAL_TMUX" capture-pane -p -t "=f8b:" | sed 's/^/    pane| /'; fi
+"$REAL_TMUX" kill-session -t "=f8v" 2>/dev/null
+
 echo "failures: $FAILS"
 [ "$FAILS" = 0 ]

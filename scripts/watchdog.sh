@@ -44,6 +44,14 @@ tool_running() { # a shell or build under claude that is not an MCP server
   d=$(ps -o pid=,args= -p "$kids" 2>/dev/null | rg -v "${TOOL_IGNORE:-mcp|codegraph serve|hindsight|npm exec|npx -y|caffeinate}") || return 1
   [ -n "$d" ]; }
 screen() { tmux capture-pane -p -t "$1" 2>/dev/null; }
+# Type raw bytes into a pane: keys <target> <bytes>, e.g. $'\r' for Enter, $'\e' for Escape.
+# send-keys is not used: tmux refuses it from outside while any read-only client
+# (fleet attach --read-only) is on the server. A paste without -p is not refused.
+# Newer tmux escapes control bytes in a paste unless given -S; older tmux has no -S and does not escape.
+keys() { local b=fleetkey-$$-$RANDOM
+  [ -n "${PASTE_RAW+x}" ] || { PASTE_RAW=; tmux list-commands paste-buffer 2>/dev/null | rg -q -- '-[a-zA-Z]*S' && PASTE_RAW=-S; }
+  printf '%s' "$2" | tmux load-buffer -b "$b" - || return 1
+  tmux paste-buffer ${PASTE_RAW:+"$PASTE_RAW"} -d -b "$b" -t "$1" || { tmux delete-buffer -b "$b" 2>/dev/null; return 1; }; }
 working_line() { rg -m1 '…\s\((\d+h\s)?(\d+m\s)?\d+s' <<<"$1"; }
 signature() { rg -v 'Reset:|Cost:|No credentials|t/s|^\s*$' <<<"$1" \
   | sed -E 's/\((([0-9]+h )?([0-9]+m )?[0-9]+s)( ·|\))/(T\4/' | cksum | cut -d' ' -f1; }
@@ -56,8 +64,8 @@ dialog_kind() { # prints trust|protected|other when a dialog is open
   rg -q 'git push to a protected target' <<<"$scr" && echo protected || echo other; }
 deny_dialog() { local s=$1 k=$2
   [ "$DRY" = 1 ] && { log "$s DRY would deny $k dialog"; return; }
-  tmux send-keys -t "$s" 2; sleep 2
-  dialog_kind "$(screen "$s")" >/dev/null && tmux send-keys -t "$s" Escape
+  keys "$s" 2; sleep 2
+  dialog_kind "$(screen "$s")" >/dev/null && keys "$s" $'\e'
   log "$s DENIED $k permission dialog (hard limit or unattended)"; }
 
 input_text() { # the text in the input line; empty when it is empty or shows a dim suggestion
@@ -103,11 +111,11 @@ paste_file() { local s=$1 f=$2 probe before _
   # [Pasted text #N ...] placeholder and nothing else. Anything more is someone's typing.
   if [ -n "$txt" ] && [ "$txt" != "$first" ] && ! [[ "$txt" =~ ^\[(Pasted\ text|\.\.\.Truncated\ text)\ \#[0-9]+[^]]*\]$ ]]; then
     # C-u clears the input line. Escape would interrupt a working agent and C-c twice exits Claude Code.
-    tmux send-keys -t "$s" C-u; sleep 1
+    keys "$s" $'\025'; sleep 1
     if user_typing "$s"; then echo "$s: other text appeared in the input line during the paste, Enter not pressed. C-u did not clear the input, check the pane." >&2
     else echo "$s: other text appeared in the input line during the paste, Enter not pressed, input cleared with C-u (including the other text)." >&2; fi
     return 4; fi
-  tmux send-keys -t "$s" Enter || { echo "$s: pasted, but tmux could not press Enter" >&2; return 7; }
+  keys "$s" $'\r' || { echo "$s: pasted, but tmux could not press Enter" >&2; return 7; }
   # Claude Code can take several seconds to render a long paste after Enter.
   local now
   for _ in $(seq 1 10); do sleep 1
@@ -119,14 +127,14 @@ idle_nudge() { local s=$1
   user_typing "$s" && { log "$s idle but user is typing, no nudge"; return; }
   dialog_kind "$(screen "$s")" >/dev/null && { log "$s dialog open, no nudge"; return; }
   [ "$DRY" = 1 ] && { log "$s DRY would send idle nudge"; return; }
-  tmux load-buffer -b in "$DIR/idle-nudge.txt" && tmux paste-buffer -p -d -b in -t "$s"; sleep 1; tmux send-keys -t "$s" Enter
+  tmux load-buffer -b in "$DIR/idle-nudge.txt" && tmux paste-buffer -p -d -b in -t "$s"; sleep 1; keys "$s" $'\r'
   log "$s idle nudge sent"; }
 
 nudge() { local s=$1
   [ "$DRY" = 1 ] && { log "$s DRY would send Esc + nudge"; return; }
-  tmux send-keys -t "$s" Escape; sleep 15
-  tmux send-keys -t "$s" -l "Watchdog: you showed no progress for several minutes and were interrupted. Check what you were doing, then continue from there."
-  sleep 1; tmux send-keys -t "$s" Enter
+  keys "$s" $'\e'; sleep 15
+  keys "$s" "Watchdog: you showed no progress for several minutes and were interrupted. Check what you were doing, then continue from there."
+  sleep 1; keys "$s" $'\r'
   log "$s nudged (Esc + continue)"; }
 
 # Start claude in session $s (new window if the session exists) and paste prompt file $f.
@@ -139,7 +147,7 @@ launch() { local s=$1 cwd=$2 n=$3 f=$4 pane ok=0 scr
   else pane=$(tmux new-session -d -P -F '#{pane_id}' -s "$s" -x 200 -y 50 -c "$cwd"); fi
   [ -n "$pane" ] || { LAUNCH_ERR="tmux could not create a window for $s"; return 4; }
   launch_fail() { LAUNCH_ERR=$1; tmux kill-pane -t "$pane" 2>/dev/null; return "$2"; }
-  tmux send-keys -t "$pane" "${CLAUDE_BIN:-claude} -n \"$n\" ${CLAUDE_ARGS:-}" Enter || { launch_fail "tmux could not type the claude command" 4; return; }
+  keys "$pane" "${CLAUDE_BIN:-claude} -n \"$n\" ${CLAUDE_ARGS:-}"$'\r' || { launch_fail "tmux could not type the claude command" 4; return; }
   # Paste only once Claude Code's UI is up. A shell prompt (starship uses ❯ too) would run the text.
   for _ in $(seq 1 45); do sleep 2; scr=$(screen "$pane")
     if [ "$(dialog_kind "$scr")" = trust ]; then
@@ -149,7 +157,7 @@ launch() { local s=$1 cwd=$2 n=$3 f=$4 pane ok=0 scr
   sleep 2
   # A claude without its prompt is closed too, so a retry starts it cleanly.
   tmux load-buffer -b wd "$f" && tmux paste-buffer -p -d -b wd -t "$pane" || { launch_fail "tmux could not paste $f" 3; return; }
-  sleep 2; tmux send-keys -t "$pane" Enter || { launch_fail "tmux could not press Enter" 3; return; }; }
+  sleep 2; keys "$pane" $'\r' || { launch_fail "tmux could not press Enter" 3; return; }; }
 
 # First start of an agent: its prompt file plus autonomy.txt.
 start_agent() { local s=$1 f=$DIR/start-$1.txt
@@ -185,7 +193,7 @@ ctx_rotate() { local s=$1 pid=$2 scr=$3 p
   p=$(ctx_pct "$scr"); [ -n "$p" ] && [ "$p" -ge "$CTX_MAX" ] || return 1
   if user_typing "$s" || dialog_kind "$scr" >/dev/null; then return 1; fi
   [ "$DRY" = 1 ] && { log "$s DRY would ask for context handoff at ${p}%"; return 1; }
-  tmux load-buffer -b cx "$DIR/ctx-handoff.txt" && tmux paste-buffer -p -d -b cx -t "$s"; sleep 1; tmux send-keys -t "$s" Enter
+  tmux load-buffer -b cx "$DIR/ctx-handoff.txt" && tmux paste-buffer -p -d -b cx -t "$s"; sleep 1; keys "$s" $'\r'
   ROT[$s]=$(date +%s); log "$s CTXROTATE asked for handoff at ${p}%"; return 1; }
 
 check() { local s=$1 pid scr wl sig limit dk now
@@ -240,7 +248,7 @@ while :; do
     if [ "${avail:-999}" -lt "${DISK_MIN_G:-40}" ] && [ $(( $(date +%s) - LOWDISK_AT )) -ge 21600 ] && [ "$DRY" = 0 ]; then
       LOWDISK_AT=$(date +%s); log "LOWDISK ${avail}G, asking agents to clean up"
       for s in "${SESSIONS[@]}"; do
-        dialog_kind "$(screen "$s")" >/dev/null || user_typing "$s" || { tmux send-keys -t "$s" -l "Watchdog: only ${avail}G free on ${DISK_PATH:-/}. When your current step ends, stop emulators and dev servers you do not need and delete build output and worktrees you no longer need, then continue."; tmux send-keys -t "$s" Enter; }
+        dialog_kind "$(screen "$s")" >/dev/null || user_typing "$s" || { keys "$s" "Watchdog: only ${avail}G free on ${DISK_PATH:-/}. When your current step ends, stop emulators and dev servers you do not need and delete build output and worktrees you no longer need, then continue."; sleep 1; keys "$s" $'\r'; }
       done
     fi
   fi
