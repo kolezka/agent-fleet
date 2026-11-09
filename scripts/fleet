@@ -373,7 +373,9 @@ EOF
     # viewer first gives its own terminal the agent window size (plus the status line).
     if [ ${#ro[@]} -gt 0 ] && [ -z "${REMOTE_SSH:-}" ] && [ -t 0 ]; then
       read -r w h st < <("${t[@]}" display-message -p -t "$s" "#{window_width} #{window_height} #{status}" 2>/dev/null) || true
-      if [[ "${w:-}" =~ ^[0-9]+$ && "${h:-}" =~ ^[0-9]+$ ]]; then [ "${st:-on}" = off ] || h=$((h + 1)); stty cols "$w" rows "$h" 2>/dev/null || true; fi
+      if [[ "${w:-}" =~ ^[0-9]+$ && "${h:-}" =~ ^[0-9]+$ ]]; then [ "${st:-on}" = off ] || h=$((h + 1)); stty cols "$w" rows "$h" 2>/dev/null || true
+        # Tell embedding viewers the size; real terminals ignore unknown OSC sequences.
+        printf '\033]777;fleet-size;%s;%s\007' "$w" "$h"; fi
     fi
     if [ -z "${REMOTE_SSH:-}" ]; then exec "${t[@]}" attach ${ro[@]+"${ro[@]}"} -t "$s"; fi
     cmd=$(printf '%q ' "${t[@]}" attach ${ro[@]+"${ro[@]}"} -t "$s")
