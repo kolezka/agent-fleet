@@ -7,11 +7,14 @@ for m in load paste enter; do
 set -u; W=$1; mode=$2
 log() { :; }; DIR=/tmp; KILLS=$(mktemp); : > $KILLS
 . "$W" 2>/dev/null
+# Keys are pasted from fleetkey-* buffers. Only the prompt (buffer wd) fails in load and
+# paste mode; in enter mode the first key paste after the prompt fails.
+PROMPTED=0
 tmux() { case "$1" in
   has-session) return 0;; new-window) echo %99;; kill-pane) echo "kill $*" >> $KILLS;;
-  load-buffer) [ "$mode" = load ] && return 1; return 0;;
-  paste-buffer) [ "$mode" = paste ] && return 1; return 0;;
-  send-keys) [[ "$*" == *" Enter" && "$*" != *"-n "* && "$mode" = enter ]] && return 1; return 0;;
+  load-buffer) [[ "$mode" = load && "$*" == *"-b wd "* ]] && return 1; return 0;;
+  paste-buffer) [[ "$*" == *"-b wd "* ]] && { [ "$mode" = paste ] && return 1; PROMPTED=1; return 0; }
+    [[ "$mode" = enter && "$PROMPTED" = 1 && "$*" == *"-b fleetkey-"* ]] && return 1; return 0;;
   *) return 0;; esac; }
 sleep() { :; }; screen() { echo 'bypass permissions on'; }; claude_pid() { echo 123; }
 launch s /tmp n /dev/null; rc=$?
