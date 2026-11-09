@@ -36,4 +36,7 @@ a=$("$P/scripts/fleet" attach a 2>&1); rc=$?
 [ "$rc" = 0 ] && [[ "$a" == *"<-L> <fleet-sock>"*"<attach>"* ]] && ok "attach a plain name" || no "attach plain rc=$rc out=[$a]"
 "$P/scripts/fleet" attach "agent'one" >/dev/null 2>&1; rc=$?
 [ "$rc" = 1 ] && ok "attach refuses a name with a quote" || no "attach quote name rc=$rc want 1"
+a=$("$P/scripts/fleet" attach --read-only a 2>&1); rc=$?
+[ "$rc" = 0 ] && [[ "$a" == *"<attach> <-f> <read-only,ignore-size> <-t> <a>"* ]] && ok "attach --read-only passes read-only,ignore-size to tmux" || no "attach --read-only rc=$rc out=[$a]"
+[[ "$("$P/scripts/fleet" attach a 2>&1)" != *"read-only"* ]] && ok "plain attach stays writable" || no "plain attach got read-only"
 echo "failures: $fails"; exit $(( fails > 0 ))
