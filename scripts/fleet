@@ -369,6 +369,12 @@ EOF
     for v in "$s" "${FLEET_TMUX_SOCKET:-x}"; do
       [[ "$v" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "fleet attach supports names made of letters, digits, '.', '_' and '-' only, got: $v" >&2; exit 1; }; done
     t=(tmux); [ -n "$FLEET_TMUX_SOCKET" ] && t+=(-L "$FLEET_TMUX_SOCKET")
+    # A sole tmux client still sizes the window even with ignore-size, so a local read-only
+    # viewer first gives its own terminal the agent window size (plus the status line).
+    if [ ${#ro[@]} -gt 0 ] && [ -z "${REMOTE_SSH:-}" ] && [ -t 0 ]; then
+      read -r w h st < <("${t[@]}" display-message -p -t "$s" "#{window_width} #{window_height} #{status}" 2>/dev/null) || true
+      if [[ "${w:-}" =~ ^[0-9]+$ && "${h:-}" =~ ^[0-9]+$ ]]; then [ "${st:-on}" = off ] || h=$((h + 1)); stty cols "$w" rows "$h" 2>/dev/null || true; fi
+    fi
     if [ -z "${REMOTE_SSH:-}" ]; then exec "${t[@]}" attach ${ro[@]+"${ro[@]}"} -t "$s"; fi
     cmd=$(printf '%q ' "${t[@]}" attach ${ro[@]+"${ro[@]}"} -t "$s")
     # shellcheck disable=SC2086 # REMOTE_SSH is a command line by design
