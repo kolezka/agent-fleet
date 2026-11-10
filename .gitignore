@@ -1,2 +1,3 @@
 watchdog.log
 *.local.conf
+/dsh/node_modules/
