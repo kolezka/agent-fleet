@@ -1,0 +1,3 @@
+- insert:
+    - id: claude-compat-agent-fleet
+      name: '@kolezka/agent-fleet-dsh'

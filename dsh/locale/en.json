@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "agent-fleet",
+    "description": "Run several autonomous Claude Code agents in tmux on a local or remote host, supervised from one session: watchdog, supervisor Monitor, message relay, claim verification, supervisor-to-supervisor handoff and advisor sessions. Pairs with phased-delivery inside each agent."
+  }
+}
