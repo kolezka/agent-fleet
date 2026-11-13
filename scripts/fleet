@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# fleet: drive a fleet of Claude Code agents in tmux on an agent host (local or over ssh).
+# fleet: drive a fleet of Claude Code (or DeepSeek Harness) agents in tmux on an agent host (local or over ssh).
 # Config: fleet.conf in the current dir, or FLEET_CONF=/path/fleet.conf.
 set -euo pipefail
 PLUGIN_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 usage() { cat <<'EOF'
 fleet init <dir>              create a fleet dir with fleet.conf and prompt templates
-fleet sync [--force]          copy fleet.conf, *.txt and watchdog.sh to FLEET_DIR on the host;
+fleet sync [--force]          copy fleet.conf, *.txt, watchdog.sh and dsh-agent.mjs to FLEET_DIR on the host;
                               refuses when a host file was edited since the last sync (--force overwrites)
 fleet pull [file...]          copy host files back into the local fleet dir (default: the synced files)
 fleet start [session...]      start agents that are not running (all when none named)
@@ -64,7 +64,9 @@ same_dir() { [ -z "${REMOTE_SSH:-}" ] && [ "$(cd "$FLEET_DIR" 2>/dev/null && pwd
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } # stdin
 # Files a full sync writes besides watchdog.sh: fleet.conf and *.txt, not the generated start-/replace- prompts.
 sync_files() { echo fleet.conf; (cd "$LOCAL_DIR" && ls ./*.txt 2>/dev/null | sed 's|^\./||' | rg -v '^(start|replace)-') || true; }
-src_of() { if [ "$1" = watchdog.sh ]; then echo "$PLUGIN_DIR/scripts/watchdog.sh"; else echo "$LOCAL_DIR/$1"; fi; }
+# Files that come from the plugin, not from the fleet dir.
+PLUGIN_FILES=(watchdog.sh dsh-agent.mjs)
+src_of() { case "$1" in watchdog.sh|dsh-agent.mjs) echo "$PLUGIN_DIR/scripts/$1" ;; *) echo "$LOCAL_DIR/$1" ;; esac; }
 
 # Measure the host copies: HOST_HASH[file] (sha256 or "absent") and
 # HOST_MANIFEST[file] (what the last sync wrote). Aborts when the host cannot be
@@ -123,7 +125,7 @@ check_names() { local f bad=()
 do_sync() { local force=$1 tmp; shift
   check_names "$@"
   if same_dir; then
-    [[ " $* " == *" watchdog.sh "* ]] && cp "$PLUGIN_DIR/scripts/watchdog.sh" "$LOCAL_DIR/watchdog.sh"
+    for f in "${PLUGIN_FILES[@]}"; do [[ " $* " == *" $f "* ]] && cp "$PLUGIN_DIR/scripts/$f" "$LOCAL_DIR/$f"; done
     echo "FLEET_DIR is the local fleet dir, nothing else to copy"; return 0
   fi
   if [ "$force" != 1 ]; then
@@ -206,6 +208,7 @@ handoff_md() { local t
   echo "## 1. Where things run"; echo
   echo "- Fleet: \`$FLEET\`, fleet dir on the host: \`$FLEET_DIR\`, local fleet dir: \`$LOCAL_DIR\`"
   echo "- Host access: REMOTE_SSH \`${REMOTE_SSH:-(local)}\`, REMOTE_USER \`${REMOTE_USER:-(none)}\`"
+  echo "- AGENT_KIND \`${AGENT_KIND:-claude}\`, DSH_ARGS \`${DSH_ARGS:-}\`"
   echo "- AGENT_CWD \`${AGENT_CWD:-}\`, CLAUDE_CONFIG_DIR \`${CLAUDE_CONFIG_DIR:-(default)}\`, CLAUDE_ARGS \`${CLAUDE_ARGS:-}\`"
   echo "- END_AT \`${END_AT:-}\`, CTX_MAX \`${CTX_MAX:-85}\`, DISK_PATH \`${DISK_PATH:-/}\`, DISK_MIN_G \`${DISK_MIN_G:-40}\`"
   echo; echo "Agents (live, checked $(date -u +%FT%TZ)):"; echo
@@ -250,14 +253,14 @@ case "$cmd" in
     load_conf; force=0
     case "${1:-}" in --force) force=1 ;; "") ;; *) echo "usage: fleet sync [--force]" >&2; exit 1 ;; esac
     mapfile -t files < <(sync_files)
-    do_sync "$force" "${files[@]}" watchdog.sh ;;
+    do_sync "$force" "${files[@]}" "${PLUGIN_FILES[@]}" ;;
   pull)
     load_conf
     same_dir && { echo "FLEET_DIR is the local fleet dir, nothing to pull"; exit 0; }
     if [ $# -gt 0 ]; then names=("$@"); else mapfile -t names < <(sync_files); fi
     check_names "${names[@]}"
     for n in "${names[@]}"; do
-      [ "$n" != watchdog.sh ] || { echo "cannot pull watchdog.sh: it comes from the plugin" >&2; exit 1; }
+      [[ " ${PLUGIN_FILES[*]} " != *" $n "* ]] || { echo "cannot pull $n: it comes from the plugin" >&2; exit 1; }
     done
     tmp=$(mktemp -d)
     { printf 'cd %q || exit 1\nset --\nfor f in' "$FLEET_DIR"; printf ' %q' "${names[@]}"

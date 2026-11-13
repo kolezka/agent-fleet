@@ -1,6 +1,6 @@
 {
   "name": "agent-fleet",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Run several autonomous Claude Code agents in tmux on a local or remote host, supervised from one session: watchdog, supervisor Monitor, message relay, claim verification, supervisor-to-supervisor handoff and advisor sessions. Pairs with phased-delivery inside each agent.",
   "author": {
     "name": "Mariusz Rakus"
