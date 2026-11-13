@@ -17,12 +17,19 @@ cat > "$D/dsh-stub" <<'EOF'
 msg=$(cat); n=$(( $(cat "$STUB_DIR/calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_DIR/calls"
 printf '%s\n' "$*" > "$STUB_DIR/args-$n"; printf '%s' "$msg" > "$STUB_DIR/msg-$n"
 sid=session-stub-1
+case "$msg" in *NOSESSION*) if [[ "$*" == *--session-id* ]]; then
+  echo '{"type":"error","message":"session \"'$sid'\" does not exist"}'; exit 1; fi ;; esac
 echo '{"type":"session","sessionId":"'$sid'","cwd":"/x"}'
 echo '{"type":"status","phase":"turn_start","turn":1}'
 echo '{"type":"status","phase":"step_start","turn":1,"step":1}'
 case "$msg" in
+  # Like DSH: the tool runs in its own process group, and DSH stops it on SIGINT or SIGTERM.
   *SLOWTOOL*) echo '{"type":"tool_call","callId":"c1","tool":"bash","input":{"description":"Sleep a while","command":"sleep 30"}}'
-    sleep 30 & wait ;;
+    perl -e 'setpgrp(0, 0); exec @ARGV' sleep 30 & t=$!
+    trap 'kill -- -$t 2>/dev/null; exit 130' INT TERM; wait ;;
+  *MCPTOOL*) echo '{"type":"status","phase":"step_end","turn":1,"step":1}'
+    echo '{"type":"tool_call","callId":"m1","tool":"mcp__x__slow","input":{}}'
+    sleep 600 & t=$!; trap 'kill $t; exit 130' INT TERM; wait ;;
   *HANG*) exec sleep 600 ;;
   *BADOPT*) echo '{"type":"error","message":"unknown option BADOPT"}'; exit 1 ;;
 esac
@@ -92,6 +99,37 @@ pgrep -f "sleep 30" >/dev/null && fail "tool process survived the interrupt" || 
 echo 'HANG now' > m.txt; paste_file "$S" m.txt >/dev/null 2>&1; sleep 2
 [[ "$(working_line "$(screen "$S")")" == *thinking* ]] && pass "open step shows thinking" || fail "no thinking marker"
 keys "$S" $'\e'; sleep 4
+
+# An open tool call with no child process (MCP, in-process) shows "tool", which also gets the long limit.
+echo 'MCPTOOL now' > m.txt; paste_file "$S" m.txt >/dev/null 2>&1; sleep 2
+[[ "$(working_line "$(screen "$S")")" == *' · tool · '* ]] && pass "open tool call shows tool" || fail "no tool marker"
+keys "$S" $'\e'; sleep 2
+[ -z "$(working_line "$(screen "$S")")" ] && pass "tool call interrupted" || fail "tool call not interrupted"
+
+# Bracketed-paste markers split across reads still make one message.
+n0=$(cat calls)
+tmux send-keys -t "$S" -l $'\e[20'; sleep 0.3; tmux send-keys -t "$S" -l $'0~SPLITA line one\rline two\e[20'; sleep 0.3
+tmux send-keys -t "$S" -l $'1~'; sleep 0.3; tmux send-keys -t "$S" Enter
+waitfor "STUBREPLY $((n0 + 1))" && [ "$(cat "msg-$((n0 + 1))")" = $'SPLITA line one\nline two' ] \
+  && pass "split paste markers give one message" || fail "split paste markers broke the message"
+
+# A long message keeps its first line in the scrollback, so delivery is confirmed.
+{ echo 'LONGMSG first line'; seq 1 3000; } > m.txt
+paste_file "$S" m.txt >/dev/null 2>&1; rc=$?
+[ "$rc" = 0 ] && pass "3000-line message delivered" || fail "3000-line message rc=$rc"
+waitfor 'STUBREPLY' >/dev/null
+# A single line wider than the pane shows as a placeholder and is sent.
+printf 'WIDE %0300d' 0 > m.txt; sleep 1
+paste_file "$S" m.txt >/dev/null 2>&1; rc=$?
+[ "$rc" = 0 ] && pass "wide single-line message delivered" || fail "wide single-line message rc=$rc"
+sleep 2
+
+# A lost DSH session is dropped, so the next message starts a new one.
+echo 'NOSESSION please' > m.txt; paste_file "$S" m.txt >/dev/null 2>&1
+waitfor 'dsh session not found' && pass "lost session reported" || fail "lost session not reported"
+n0=$(cat calls); echo 'NOSESSION again' > m.txt; paste_file "$S" m.txt >/dev/null 2>&1
+waitfor "STUBREPLY $((n0 + 1))" && ! rg -q -- --session-id "args-$((n0 + 1))" \
+  && pass "next message starts a new session" || fail "lost session reused"
 
 # A failed run shows DSH's error event, not just "no output".
 echo 'BADOPT' > m.txt; paste_file "$S" m.txt >/dev/null 2>&1

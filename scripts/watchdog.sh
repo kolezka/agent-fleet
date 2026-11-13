@@ -244,7 +244,8 @@ check() { local s=$1 pid scr wl sig limit dk now
       idle_nudge "$s"; IDLE_NUDGED[$s]=1; LASTNUDGE[$s]=$now; fi
   elif [ "${STATE[$s]}" = working ] || [ "${STATE[$s]}" = tool ]; then WAIT[$s]=0; WORKRUN[$s]=$(( ${WORKRUN[$s]:-0} + 1 ))
   else WAIT[$s]=0; fi
-  limit=3; [[ "$wl" == *thinking* ]] && limit=10
+  # dsh-agent.mjs marks an open model step "thinking" and an open tool call "tool": the screen can hold still there.
+  limit=3; [[ "$wl" == *thinking* || "$wl" == *' · tool · '* ]] && limit=10
   log "$s state=${STATE[$s]} strike=${STRIKE[$s]}/$limit pid=${pid:-none} ctx=$(ctx_pct "$scr")%"
   ctx_rotate "$s" "$pid" "$scr" && return
   if [ "${STRIKE[$s]}" -ge "$limit" ]; then
