@@ -68,7 +68,7 @@ dsh plugin --profile web add file:/absolute/path/to/agent-fleet/dsh
 The adapter imports the published `claude-plugin-dsh` runtime directly. To update it, change its pinned version in `dsh/package.json`, run `bun install` in `dsh/`, and commit the updated `bun.lock`. Inspect the installed adapter without changing a DSH profile:
 
 ```sh
-bun x claude-plugin-dsh@0.1.0 inspect /absolute/path/to/agent-fleet
+bun x claude-plugin-dsh@0.2.0 inspect /absolute/path/to/agent-fleet
 ```
 
 This loads the supervisor skill into DSH. The agents it supervises still need Claude Code and `phased-delivery` as described above.
