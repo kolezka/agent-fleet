@@ -5,6 +5,7 @@ A Claude Code plugin for supervising a fleet of autonomous Claude Code agents. T
 ## Layout
 
 - `scripts/fleet`: the CLI. It runs on the supervisor machine (macOS or Linux) and reaches the host through `rx` (bash script over stdin, optional `su - REMOTE_USER`).
+- `scripts/dsh-agent.mjs`: terminal front end for `AGENT_KIND=dsh`. Node 20+ built-ins only, no packages. It must keep printing the cues the watchdog reads: `dsh-agent ready`, the `❯` input line, the `Working… (Ns` line and `dsh context (N%)`.
 - `scripts/watchdog.sh`: runs on the agent host only, Linux or macOS with bash 4+. Tools that differ between the two go through its portable helpers (`to_epoch`, `pid_cwd`, `disk_avail_g`, `tool_running`); do not add GNU-only flags. When sourced it loads the helpers and returns before the loop. `fleet send`, `fleet start` and `fleet status` depend on that.
 - `scripts/smoke-test.sh`: the smoke test against a real host (see below).
 - `scripts/test-local.sh`: local checks with a stub ssh and a private tmux server. Add a check there for every bug fix.
@@ -27,6 +28,8 @@ A Claude Code plugin for supervising a fleet of autonomous Claude Code agents. T
 bash -n scripts/fleet && bash -n scripts/watchdog.sh && bash -n scripts/smoke-test.sh && bash -n scripts/test-local.sh
 shellcheck -S warning scripts/fleet scripts/watchdog.sh scripts/smoke-test.sh scripts/test-local.sh
 scripts/test-local.sh   # local checks with a stub ssh and a private tmux server, must exit 0
+tests/dsh-agent-stub.sh # AGENT_KIND=dsh with a stub dsh, must exit 0
+node --check scripts/dsh-agent.mjs
 jq . .claude-plugin/*.json >/dev/null
 rg -n '\x{2013}|\x{2014}' .   # must find nothing: no en or em dashes anywhere
 ```

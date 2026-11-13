@@ -26,6 +26,9 @@ pid_cwd() { if [ -d "/proc/$1" ]; then readlink "/proc/$1/cwd"; else lsof -a -p 
 disk_avail_g() { df -Pk "$1" | awk 'NR==2 { print int($4 / 1048576) }'; }
 END_TS=$(to_epoch "${END_AT:-2100-01-01T00:00:00Z}") || { echo "END_AT must look like 2026-11-06T06:00:00Z, got ${END_AT:-}" >&2; return 2 2>/dev/null || exit 2; }
 CTX_MAX=${CTX_MAX:-85}
+# claude: Claude Code in the pane. dsh: dsh-agent.mjs, a terminal front end for DeepSeek Harness.
+AGENT_KIND=${AGENT_KIND:-claude}
+case "$AGENT_KIND" in claude|dsh) ;; *) echo "AGENT_KIND must be claude or dsh, got $AGENT_KIND" >&2; return 2 2>/dev/null || exit 2;; esac
 for a in "$@"; do case "$a" in --once) ONCE=1;; --dry) DRY=1;; --quiet-start) QUIET=1;; esac; done
 declare -A NAME PROMPT SIG STRIKE NUDGED REPL STATE WAIT IDLE_NUDGED WORKRUN LASTNUDGE DIALOG ROT
 SESSIONS=()
@@ -35,13 +38,17 @@ for row in "${AGENTS[@]}"; do IFS='|' read -r s t p <<<"$row"; SESSIONS+=("$s");
 TICK=0; LOWDISK_AT=0
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$LOG"; [ "$ONCE" = 1 ] && printf '%s\n' "$*"; return 0; }
 
-claude_pid() { # newest claude process in the session's panes
-  local pp; for pp in $(tmux list-panes -s -t "$1" -F '#{pane_pid}' 2>/dev/null); do
-    pgrep -P "$pp" -f '^claude ' ; done | tail -1; }
-tool_running() { # a shell or build under claude that is not an MCP server
+claude_pid() { # newest agent process (claude, or dsh-agent.mjs) in the session's panes
+  local pp re='^claude '; [ "$AGENT_KIND" = dsh ] && re='dsh-agent\.mjs( |$)'
+  for pp in $(tmux list-panes -s -t "$1" -F '#{pane_pid}' 2>/dev/null); do
+    pgrep -P "$pp" -f "$re" ; done | tail -1; }
+tool_running() { # a shell or build under the agent that is not an MCP server
   # pgrep -P plus ps -p works on Linux and macOS (macOS ps has no --ppid).
-  local kids d; kids=$(pgrep -P "$1" | paste -sd, -); [ -n "$kids" ] || return 1
-  d=$(ps -o pid=,args= -p "$kids" 2>/dev/null | rg -v "${TOOL_IGNORE:-mcp|codegraph serve|hindsight|npm exec|npx -y|caffeinate}") || return 1
+  local kids d p=$1
+  # dsh-agent.mjs runs one dsh process per message; the tools are that process's children.
+  if [ "$AGENT_KIND" = dsh ]; then p=$(pgrep -P "$1" | paste -sd, -); [ -n "$p" ] || return 1; fi
+  kids=$(pgrep -P "$p" | paste -sd, -); [ -n "$kids" ] || return 1
+  d=$(ps -o pid=,args= -p "$kids" 2>/dev/null | rg -v "${TOOL_IGNORE:-mcp|codegraph serve|hindsight|npm exec|npx -y|caffeinate|dsh-ptc-runtime}") || return 1
   [ -n "$d" ]; }
 screen() { tmux capture-pane -p -t "$1" 2>/dev/null; }
 # Type raw bytes into a pane: keys <target> <bytes>, e.g. $'\r' for Enter, $'\e' for Escape.
@@ -58,6 +65,8 @@ signature() { rg -v 'Reset:|Cost:|No credentials|t/s|^\s*$' <<<"$1" \
 
 dialog_kind() { # prints trust|protected|other when a dialog is open
   local scr=$1
+  # dsh-agent.mjs has no dialogs (headless DSH fails closed), so dialog text there is agent output.
+  [ "$AGENT_KIND" = dsh ] && return 1
   # Workspace trust is the owner's call and "deny" would pick "No, exit", so it gets its own kind.
   rg -q 'Is this a project you created or one you trust|Yes, I trust this folder' <<<"$scr" && { echo trust; return 0; }
   rg -q 'Do you want to proceed\?|❯ 1\. Yes' <<<"$scr" || return 1
@@ -147,13 +156,18 @@ launch() { local s=$1 cwd=$2 n=$3 f=$4 pane ok=0 scr
   else pane=$(tmux new-session -d -P -F '#{pane_id}' -s "$s" -x 200 -y 50 -c "$cwd"); fi
   [ -n "$pane" ] || { LAUNCH_ERR="tmux could not create a window for $s"; return 4; }
   launch_fail() { LAUNCH_ERR=$1; tmux kill-pane -t "$pane" 2>/dev/null; return "$2"; }
-  keys "$pane" "${CLAUDE_BIN:-claude} -n \"$n\" ${CLAUDE_ARGS:-}"$'\r' || { launch_fail "tmux could not type the claude command" 4; return; }
-  # Paste only once Claude Code's UI is up. A shell prompt (starship uses ❯ too) would run the text.
+  local cmd ready='bypass permissions on|for shortcuts'
+  if [ "$AGENT_KIND" = dsh ]; then ready='dsh-agent ready'
+    # DSH_ARGS is split like CLAUDE_ARGS: the shell in the pane parses it.
+    cmd="${NODE_BIN:-node} $(printf %q "$DIR/dsh-agent.mjs") --name $(printf %q "$n") --dsh $(printf %q "${DSH_BIN:-dsh}") --context-tokens $(printf %q "${DSH_CONTEXT_TOKENS:-1000000}") -- ${DSH_ARGS:-}"
+  else cmd="${CLAUDE_BIN:-claude} -n \"$n\" ${CLAUDE_ARGS:-}"; fi
+  keys "$pane" "$cmd"$'\r' || { launch_fail "tmux could not type the $AGENT_KIND command" 4; return; }
+  # Paste only once the agent's UI is up. A shell prompt (starship uses ❯ too) would run the text.
   for _ in $(seq 1 45); do sleep 2; scr=$(screen "$pane")
     if [ "$(dialog_kind "$scr")" = trust ]; then
       launch_fail "workspace trust dialog: open claude once in $cwd by hand and trust it" 2; return; fi
-    [ -n "$(claude_pid "$s")" ] && rg -q 'bypass permissions on|for shortcuts' <<<"$scr" && { ok=1; break; }; done
-  [ "$ok" = 1 ] || { launch_fail "claude UI not detected after 90 s" 1; return; }
+    [ -n "$(claude_pid "$s")" ] && rg -q "$ready" <<<"$scr" && { ok=1; break; }; done
+  [ "$ok" = 1 ] || { launch_fail "$AGENT_KIND UI not detected after 90 s" 1; return; }
   sleep 2
   # A claude without its prompt is closed too, so a retry starts it cleanly.
   tmux load-buffer -b wd "$f" && tmux paste-buffer -p -d -b wd -t "$pane" || { launch_fail "tmux could not paste $f" 3; return; }
@@ -183,7 +197,8 @@ replace() { local s=$1 pid=$2 why="hung and was stopped by the watchdog" cwd
 
 # Context rotation: at CTX_MAX % ask the lead to save state and answer
 # CONTEXT-HANDOFF-READY; only then replace it, so its workers are not killed mid-step.
-ctx_pct() { rg -o '/1\.0M\W*\((\d+)%\)' -r '$1' <<<"$1" | tail -1; }
+ctx_pct() { local re='/1\.0M\W*\((\d+)%\)'; [ "$AGENT_KIND" = dsh ] && re='dsh context \((\d+)%\)'
+  rg -o "$re" -r '$1' <<<"$1" | tail -1; }
 ctx_rotate() { local s=$1 pid=$2 scr=$3 p
   [ -n "$pid" ] || return 1
   if [ -n "${ROT[$s]:-}" ]; then
@@ -229,7 +244,8 @@ check() { local s=$1 pid scr wl sig limit dk now
       idle_nudge "$s"; IDLE_NUDGED[$s]=1; LASTNUDGE[$s]=$now; fi
   elif [ "${STATE[$s]}" = working ] || [ "${STATE[$s]}" = tool ]; then WAIT[$s]=0; WORKRUN[$s]=$(( ${WORKRUN[$s]:-0} + 1 ))
   else WAIT[$s]=0; fi
-  limit=3; [[ "$wl" == *thinking* ]] && limit=10
+  # dsh-agent.mjs marks an open model step "thinking" and an open tool call "tool": the screen can hold still there.
+  limit=3; [[ "$wl" == *thinking* || "$wl" == *' · tool · '* ]] && limit=10
   log "$s state=${STATE[$s]} strike=${STRIKE[$s]}/$limit pid=${pid:-none} ctx=$(ctx_pct "$scr")%"
   ctx_rotate "$s" "$pid" "$scr" && return
   if [ "${STRIKE[$s]}" -ge "$limit" ]; then

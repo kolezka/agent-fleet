@@ -9,6 +9,7 @@ It grew out of a 48 h run of four TV-platform agents (Apple TV, Android TV, Fire
 - `skills/agent-fleet/SKILL.md`: the supervisor workflow (setup, supervise, relay, verify, hand off, advise).
 - `scripts/fleet`: the CLI. It runs on the Mac or on the host, and reaches the host over ssh via `fleet.conf`.
 - `scripts/smoke-test.sh`: tests the CLI against a real host with a scratch fleet. It never starts claude and cleans up after itself.
+- `scripts/dsh-agent.mjs`: the terminal front end for DeepSeek Harness agents (`AGENT_KIND=dsh`).
 - `scripts/watchdog.sh`: runs on the agent host. Every 60 s it nudges idle agents, nudges and then replaces stalled ones, recreates missing sessions, denies permission dialogs, warns on low disk, rotates agents at `CTX_MAX`% context, and exits at `END_AT`.
 - `templates/`: `fleet.conf`, `autonomy.txt` (the standing rule and hard limits appended to every agent prompt), `idle-nudge.txt`, `ctx-handoff.txt`, `agent.example.txt`.
 
@@ -71,7 +72,18 @@ The adapter imports the published `claude-plugin-dsh` runtime directly. To updat
 bun x claude-plugin-dsh@0.2.0 inspect /absolute/path/to/agent-fleet
 ```
 
-This loads the supervisor skill into DSH. The agents it supervises still need Claude Code and `phased-delivery` as described above.
+This loads the supervisor skill into DSH. To run the agents themselves in DSH, see the next section.
+
+### DeepSeek Harness agents
+
+Set `AGENT_KIND=dsh` in `fleet.conf` to run the agents in DeepSeek Harness instead of Claude Code. DSH has no interactive terminal UI, so each agent pane runs `dsh-agent.mjs`, a small Node front end that `fleet sync` copies next to `watchdog.sh`. It shows the same cues the watchdog reads from Claude Code (a ready line, the `❯` input line, a `Working… (12s` line and `●` replies) and runs every message as one `dsh --profile headless --json` turn. From the second message on it passes `--session-id`, so the agent keeps one DSH session. Escape interrupts the running turn and stops its tools.
+
+- Agent host: Node 20+ and the `dsh` CLI besides tmux and ripgrep. `DSH_BIN` and `NODE_BIN` override the commands.
+- `DSH_ARGS` goes to every run, for example `--permission-mode workspace-write` or `--patch /abs/agent.yml` for a model or tool set. Headless DSH has no permission dialogs: what the permission preset does not allow is refused, so the hard limits in `autonomy.txt` plus the preset are the whole safety net. With `--approval-policy never` nothing is asked and the preset alone decides.
+- Model, provider and credentials come from the DSH config on the host (`~/.dsh`, its `.env`, or a `--patch` file). Never put keys in `fleet.conf`.
+- `phased-delivery` must be loaded in the agents' DSH profile: install its `dsh/` adapter on the host the same way as above.
+- Context: `dsh-agent.mjs` prints `dsh context (N%)` after each run from the last step's token count, measured against `DSH_CONTEXT_TOKENS` (default 1000000). Set it to the model's window so rotation at `CTX_MAX` means the same thing as with Claude Code.
+- Limits: replies show up per model step, not as a live stream, so a long step looks still. While a step runs the working line says `thinking`, and the watchdog gives it the long stall limit. There is no workspace trust question, so the one-time trust step is not needed.
 
 ### Local only (one machine)
 
