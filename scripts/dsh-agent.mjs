@@ -24,6 +24,7 @@ let input = ''            // text in the input line, may hold newlines from a pa
 let pastes = 0
 let inPaste = false
 let pasted = false        // the current input holds pasted text
+let typed = ''            // text typed outside a paste, shown next to a paste placeholder
 let pend = ''             // an escape sequence cut off at the end of the last read
 let pendTimer = null
 let busy = null           // { child, started, step, stopped }
@@ -49,9 +50,10 @@ const elapsed = (ms) => { const s = Math.floor(ms / 1000), h = Math.floor(s / 36
 function inputShown() {
   // Pasted text that does not fit on the line shows as a placeholder, as in Claude Code,
   // so the watchdog can still tell its own paste apart from typing.
-  if (!input.includes('\n') && !(pasted && width('❯ ' + input) > cols())) return input
+  // Typed text stays visible beside it, so the watchdog never mistakes it for its own paste.
+  if (!pasted || (!input.includes('\n') && width('❯ ' + input) <= cols())) return input
   const n = input.split('\n').length - 1
-  return '[Pasted text #' + pastes + ' +' + n + ' lines]'
+  return '[Pasted text #' + pastes + ' +' + n + ' lines]' + (typed ? ' ' + typed : '')
 }
 function clearFooter() {
   if (!footer) return
@@ -81,14 +83,15 @@ function status() {
   print('  ' + parts.join(' · '))
 }
 
+function clearInput() { input = ''; typed = ''; pasted = false }
 function submit() {
   const msg = input
-  input = ''; pasted = false
+  clearInput()
   if (!msg.trim()) { redraw(); return }
-  // Echo only the first line: a long message would push it out of the scrollback,
+  // Echo only the first non-blank line: a long message would push it out of the scrollback,
   // and the watchdog looks for that line to confirm delivery.
-  const lines = msg.split('\n'), rest = lines.length - 1
-  print('> ' + lines[0] + (rest ? '\n  [+' + rest + ' lines]' : '') + (busy ? '\n  (queued)' : ''))
+  const lines = msg.split('\n'), first = lines.find((l) => l.trim()), rest = lines.length - 1
+  print('> ' + first + (rest ? '\n  [+' + rest + ' lines]' : '') + (busy ? '\n  (queued)' : ''))
   queue.push(msg)
   if (!busy) next()
 }
@@ -100,10 +103,11 @@ function next() {
   const args = ['--profile', 'headless', ...opt.extra, '--json']
   if (sessionId) args.push('--session-id', sessionId)
   args.push('-')
-  // DSH runs its tools in their own process groups and stops them on SIGINT or SIGTERM,
-  // so signals go to DSH itself. It stays in our process group, so closing the pane reaches it too.
-  const child = spawn(opt.dsh, args, { stdio: ['pipe', 'pipe', 'pipe'] })
-  busy = { child, started: Date.now(), step: 0, stopped: false, final: null, err: '', tools: new Set() }
+  // DSH runs its tools in their own process groups and stops them on SIGINT or SIGTERM, so signals
+  // go to DSH itself. Its own session keeps the pane's SIGHUP away: DSH would die on it without
+  // stopping its tools, while quit() sends SIGTERM and waits.
+  const child = spawn(opt.dsh, args, { stdio: ['pipe', 'pipe', 'pipe'], detached: true })
+  busy = { child, started: Date.now(), step: 0, stopped: false, final: null, err: '', tools: new Set(), resumed: !!sessionId }
   const run = busy
   child.stdin.end(msg)
   let buf = ''
@@ -117,9 +121,10 @@ function next() {
   // A tool DSH left behind can hold the output pipe open; do not stay busy for it.
   child.on('exit', () => setTimeout(() => { child.stdout.destroy(); child.stderr.destroy() }, 2000).unref())
   child.on('close', (code, signal) => {
+    if (quitting) return
     if (buf.trim()) event(run, buf)
     busy = null
-    if (/session\b.*\bdoes not exist/i.test(run.err)) {
+    if (run.resumed && !run.final && /session "[^"]+" does not exist/.test(run.err)) {
       sessionId = null
       reply('dsh session not found, the next message starts a new session')
     }
@@ -165,6 +170,7 @@ let quitting = false
 function quit() {
   if (quitting) return
   quitting = true
+  queue.length = 0
   clearFooter(); out.write('\x1b[?2004l')
   if (!busy) process.exit(0)
   // Wait for DSH to stop its tools, so it does not keep working beside a replacement.
@@ -176,11 +182,15 @@ function quit() {
 
 // A read can end in the middle of an escape sequence (a long paste arrives in several reads).
 // Such a tail waits for the next read; a lone Esc counts as an interrupt only if nothing follows soon.
+// CSI: parameter and intermediate bytes 0x20-0x3f, then one final byte 0x40-0x7e.
+const csiBody = (c) => c >= ' ' && c <= '?'
 function incomplete(s, i) {
   if (i + 1 >= s.length) return true
-  if (s[i + 1] !== '[' && s[i + 1] !== 'O') return false
-  for (let j = i + 2; j < s.length; j++) if (/[@-~]/.test(s[j])) return false
-  return true
+  if (s[i + 1] === 'O') return i + 2 >= s.length
+  if (s[i + 1] !== '[') return false
+  let j = i + 2
+  while (j < s.length && csiBody(s[j])) j++
+  return j >= s.length && j - i < 32   // a longer run is not a real key sequence
 }
 function flushPending() {
   pendTimer = null
@@ -197,21 +207,24 @@ function key(chunk) {
       if (incomplete(s, i)) { pend = s.slice(i); pendTimer = setTimeout(flushPending, 50); break }
       if (s.startsWith('\x1b[200~', i)) { inPaste = true; pasted = true; pastes++; i += 5; continue }
       if (s.startsWith('\x1b[201~', i)) { inPaste = false; i += 5; continue }
-      if (s[i + 1] === '[' || s[i + 1] === 'O') { // other CSI or SS3 sequence: skip it
-        let j = i + 2; while (!/[@-~]/.test(s[j])) j++; i = j; continue }
+      if (s[i + 1] === 'O') { i += 2; continue }   // SS3 key: skip it
+      if (s[i + 1] === '[') {                       // other CSI key: skip it
+        let j = i + 2; while (j < s.length && csiBody(s[j])) j++
+        // A byte that cannot end the sequence aborts it and is handled as a normal key.
+        i = j < s.length && s[j] >= '@' && s[j] <= '~' ? j : j - 1; continue }
       interrupt(); continue
     }
     if (inPaste) { input += c === '\r' ? '\n' : c; continue }
     if (c === '\r' || c === '\n') { submit(); continue }
-    if (c === '\x15') { input = ''; pasted = false; continue }      // C-u
-    if (c === '\x7f' || c === '\b') { input = input.slice(0, -1); continue }
+    if (c === '\x15') { clearInput(); continue }                   // C-u
+    if (c === '\x7f' || c === '\b') { input = input.slice(0, -1); typed = typed.slice(0, -1); continue }
     if (c === '\x03') {                                                  // C-c: clear, twice on empty exits
-      if (input) { input = ''; pasted = false; continue }
+      if (input) { clearInput(); continue }
       if (Date.now() - lastCtrlC < 2000) quit()
       lastCtrlC = Date.now(); print('  Press Ctrl-C again to exit'); continue
     }
     if (c === '\x04' && !input) quit()
-    if (c >= ' ' || c === '\t') input += c
+    if (c >= ' ' || c === '\t') { input += c; typed += c }
   }
   redraw()
 }
@@ -220,6 +233,7 @@ if (!process.stdin.isTTY) { process.stderr.write('dsh-agent: needs a terminal (r
 process.stdin.setRawMode(true)
 process.stdin.setEncoding('utf8')
 process.stdin.on('data', key)
+out.on('error', () => {})   // the pane may already be gone while quit() waits for DSH
 process.on('SIGHUP', quit)
 process.on('SIGTERM', quit)
 out.on('resize', redraw)

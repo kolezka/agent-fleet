@@ -17,6 +17,7 @@ cat > "$D/dsh-stub" <<'EOF'
 msg=$(cat); n=$(( $(cat "$STUB_DIR/calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_DIR/calls"
 printf '%s\n' "$*" > "$STUB_DIR/args-$n"; printf '%s' "$msg" > "$STUB_DIR/msg-$n"
 sid=session-stub-1
+case "$msg" in *TMUXERR*) echo 'tmux: session "foo" does not exist' >&2 ;; esac
 case "$msg" in *NOSESSION*) if [[ "$*" == *--session-id* ]]; then
   echo '{"type":"error","message":"session \"'$sid'\" does not exist"}'; exit 1; fi ;; esac
 echo '{"type":"session","sessionId":"'$sid'","cwd":"/x"}'
@@ -30,7 +31,7 @@ case "$msg" in
   *MCPTOOL*) echo '{"type":"status","phase":"step_end","turn":1,"step":1}'
     echo '{"type":"tool_call","callId":"m1","tool":"mcp__x__slow","input":{}}'
     sleep 600 & t=$!; trap 'kill $t; exit 130' INT TERM; wait ;;
-  *HANG*) exec sleep 600 ;;
+  *HANG*) exec sleep 600 ;;  # the stub itself is the "model step": a signal ends it
   *BADOPT*) echo '{"type":"error","message":"unknown option BADOPT"}'; exit 1 ;;
 esac
 echo '{"type":"status","phase":"step_end","turn":1,"step":1,"usage":{"totalTokens":420000}}'
@@ -124,6 +125,27 @@ paste_file "$S" m.txt >/dev/null 2>&1; rc=$?
 [ "$rc" = 0 ] && pass "wide single-line message delivered" || fail "wide single-line message rc=$rc"
 sleep 2
 
+# A message that starts with a blank line is still confirmed.
+printf '\nBLANKFIRST hello\n' > m.txt; paste_file "$S" m.txt >/dev/null 2>&1; rc=$?
+[ "$rc" = 0 ] && pass "message with a leading blank line delivered" || fail "leading blank line rc=$rc"
+waitfor 'STUBREPLY' >/dev/null; sleep 1
+
+# Typing next to a wide paste stays visible, so the watchdog does not take it for its own paste.
+printf 'WIDE2 %0300d' 0 > m.txt; tmux load-buffer -b t m.txt; tmux paste-buffer -p -d -b t -t "$S"
+tmux send-keys -t "$S" -l 'abc'; sleep 1
+[[ "$(input_text "$S")" == *abc ]] && pass "typing beside a paste placeholder is shown" || fail "typing hidden: $(input_text "$S")"
+keys "$S" $'\025'; sleep 1
+
+# Esc then [ and digits (Alt-[ on some terminals) does not swallow Enter.
+n0=$(cat calls); tmux send-keys -t "$S" -l 'ALTBRACKET'; tmux send-keys -t "$S" -l $'\e[12'; sleep 0.3; tmux send-keys -t "$S" Enter
+waitfor "STUBREPLY $((n0 + 1))" 10 && pass "unfinished CSI does not eat Enter" || fail "unfinished CSI ate Enter"
+sleep 1
+
+# Other "does not exist" text on stderr of a finished run keeps the session.
+n0=$(cat calls); echo 'TMUXERR once' > m.txt; paste_file "$S" m.txt >/dev/null 2>&1; waitfor "STUBREPLY $((n0 + 1))" >/dev/null
+echo 'after TMUXERR' > m.txt; paste_file "$S" m.txt >/dev/null 2>&1; waitfor "STUBREPLY $((n0 + 2))" >/dev/null
+rg -q -- --session-id "args-$((n0 + 2))" && pass "unrelated stderr keeps the session" || fail "session dropped on unrelated stderr"
+
 # A lost DSH session is dropped, so the next message starts a new one.
 echo 'NOSESSION please' > m.txt; paste_file "$S" m.txt >/dev/null 2>&1
 waitfor 'dsh session not found' && pass "lost session reported" || fail "lost session not reported"
@@ -142,5 +164,17 @@ dialog_kind 'Do you want to proceed?' >/dev/null && fail "dialog_kind fired for 
 pid=$(claude_pid "$S"); replace "$S" "$pid" >/dev/null 2>&1
 waitfor 'dsh-agent ready: Dsh stub \(replacement 1\)' 40 && pass "replacement started" || fail "no replacement"
 kill -0 "$pid" 2>/dev/null && fail "old wrapper still alive" || pass "old wrapper gone"
+
+# Quitting with a queued message starts no new DSH run, and closing the pane stops DSH.
+waitfor 'dsh-agent ready: Dsh stub \(replacement 1\)' 10 >/dev/null; sleep 1
+echo 'HANG quit' > m.txt; paste_file "$S" m.txt >/dev/null 2>&1; sleep 1
+tmux send-keys -t "$S" -l 'QUEUED next'; tmux send-keys -t "$S" Enter; sleep 1
+n0=$(cat calls); kill -TERM "$(claude_pid "$S")"; sleep 5
+[ "$(cat calls)" = "$n0" ] && pass "queued message not run after quit" || fail "queued message ran after quit"
+pgrep -f 'sleep 600' >/dev/null && fail "dsh survived quit" || pass "dsh stopped on quit"
+tmux respawn-pane -k -t "$S" "node $D/dsh-agent.mjs --dsh $D/dsh-stub"; sleep 2
+echo 'HANG hup' > m.txt; paste_file "$S" m.txt >/dev/null 2>&1; sleep 1
+tmux kill-session -t "$S"; sleep 5
+pgrep -f 'sleep 600' >/dev/null && { fail "dsh survived pane close"; pkill -f 'sleep 600'; } || pass "dsh stopped when the pane closed"
 
 echo "failures: $fails"; exit $(( fails > 0 ))
