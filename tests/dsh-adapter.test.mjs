@@ -16,7 +16,10 @@ test('standalone DSH adapter installs its pinned runtime and registers the fleet
       filter: (path) => !['.git', 'node_modules'].includes(path.split('/').at(-1)),
     })
     const manifest = JSON.parse(readFileSync(join(dir, 'dsh/package.json'), 'utf8'))
-    assert.equal(manifest.dependencies['claude-plugin-dsh'], '0.2.0')
+    const runtimeVersion = manifest.dependencies['claude-plugin-dsh']
+    assert.match(runtimeVersion, /^\d+\.\d+\.\d+$/)
+    const lock = readFileSync(join(dir, 'dsh/bun.lock'), 'utf8')
+    assert.ok(lock.includes(`"claude-plugin-dsh@${runtimeVersion}"`))
     assert.ok(!existsSync(join(dir, 'dsh/claude-compat.js')), 'runtime is not vendored')
     const install = spawnSync('bun', ['install', '--frozen-lockfile'], { cwd: join(dir, 'dsh'), encoding: 'utf8' })
     assert.equal(install.status, 0, `frozen install failed: ${install.stderr}`)
@@ -42,7 +45,7 @@ console.log(JSON.stringify({ runtime, version, name, candidate, content: skill?.
     const result = run()
     assertRuntimeLoads(result)
     const registration = JSON.parse(result.stdout)
-    assert.equal(registration.version, '0.2.0')
+    assert.equal(registration.version, runtimeVersion)
     assert.equal(registration.runtime, join(dir, 'dsh/node_modules/claude-plugin-dsh/package.json'))
     assert.equal(registration.name, 'claude-compat-agent-fleet')
     assert.equal(registration.candidate.name, 'agent-fleet')
