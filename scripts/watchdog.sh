@@ -160,7 +160,7 @@ launch() { local s=$1 cwd=$2 n=$3 f=$4 pane ok=0 scr
   if [ "$AGENT_KIND" = dsh ]; then ready='dsh-agent ready'
     # DSH_ARGS is split like CLAUDE_ARGS: the shell in the pane parses it.
     cmd="${NODE_BIN:-node} $(printf %q "$DIR/dsh-agent.mjs") --name $(printf %q "$n") --dsh $(printf %q "${DSH_BIN:-dsh}") --context-tokens $(printf %q "${DSH_CONTEXT_TOKENS:-1000000}") -- ${DSH_ARGS:-}"
-  else cmd="${CLAUDE_BIN:-claude} -n \"$n\" ${CLAUDE_ARGS:-}"; fi
+  else cmd="${CLAUDE_BIN:-claude} -n \"$n\" $(agent_args "$s")"; fi
   keys "$pane" "$cmd"$'\r' || { launch_fail "tmux could not type the $AGENT_KIND command" 4; return; }
   # Paste only once the agent's UI is up. A shell prompt (starship uses ❯ too) would run the text.
   for _ in $(seq 1 45); do sleep 2; scr=$(screen "$pane")
@@ -173,24 +173,32 @@ launch() { local s=$1 cwd=$2 n=$3 f=$4 pane ok=0 scr
   tmux load-buffer -b wd "$f" && tmux paste-buffer -p -d -b wd -t "$pane" || { launch_fail "tmux could not paste $f" 3; return; }
   sleep 2; keys "$pane" $'\r' || { launch_fail "tmux could not press Enter" 3; return; }; }
 
-# First start of an agent: its prompt file plus autonomy.txt.
-start_agent() { local s=$1 f=$DIR/start-$1.txt
-  { cat "$DIR/${PROMPT[$s]}"; printf '\n'; [ -f "$DIR/autonomy.txt" ] && cat "$DIR/autonomy.txt"; } > "$f"
-  if ! launch "$s" "${AGENT_CWD:-$HOME}" "${NAME[$s]}" "$f"; then
+# Per-agent values: fleet.conf may define agent_overrides, called with the session name, to set
+# AGENT_CWD and CLAUDE_ARGS for that agent only. It runs in a subshell, so nothing leaks to the next agent.
+# It must print nothing: its output would become part of the folder or the typed command.
+agent_cwd() { ( declare -F agent_overrides >/dev/null && agent_overrides "$1"; printf '%s' "${AGENT_CWD:-$HOME}" ); }
+agent_args() { ( declare -F agent_overrides >/dev/null && agent_overrides "$1"; printf '%s' "${CLAUDE_ARGS:-}" ); }
+
+# First start of an agent: its prompt file plus autonomy.txt. Prompt copies are private (umask 077).
+start_agent() { local s=$1 f=$DIR/start-$1.txt cwd
+  cwd=$(agent_cwd "$s")
+  # rm first: an older watchdog may have left the copy readable by others, and umask applies only on create.
+  ( umask 077; rm -f "$f"; { cat "$DIR/${PROMPT[$s]}"; printf '\n'; [ -f "$DIR/autonomy.txt" ] && cat "$DIR/autonomy.txt"; } > "$f" )
+  if ! launch "$s" "$cwd" "${NAME[$s]}" "$f"; then
     log "$s START FAILED: $LAUNCH_ERR (prompt NOT pasted: $f)"; return 1; fi
-  log "$s STARTED \"${NAME[$s]}\" in ${AGENT_CWD:-$HOME}"; }
+  log "$s STARTED \"${NAME[$s]}\" in $cwd"; }
 
 replace() { local s=$1 pid=$2 why="hung and was stopped by the watchdog" cwd
   [ "${3:-}" = context ] && why="was retired by the watchdog because its context window was nearly full, after it confirmed its run file and handoff are current"
-  cwd=${AGENT_CWD:-$HOME}
+  cwd=$(agent_cwd "$s")
   if [ -n "$pid" ]; then local c; c=$(pid_cwd "$pid"); [ -d "$c" ] && cwd=$c; fi
   [ "$DRY" = 1 ] && { log "$s DRY would kill pid ${pid:-none} and start a replacement in $cwd"; return; }
   [ -n "$pid" ] && kill "$pid" 2>/dev/null; sleep 5; [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
   REPL[$s]=$(( ${REPL[$s]:-0} + 1 )); printf '%s\n' "${REPL[$s]}" > "$DIR/.repl-$s"
   local n="${NAME[$s]} (replacement ${REPL[$s]})" f=$DIR/replace-$s.txt
-  { cat "$DIR/${PROMPT[$s]}"; printf '\n'; [ -f "$DIR/autonomy.txt" ] && cat "$DIR/autonomy.txt"; printf '\n'
+  ( umask 077; rm -f "$f"; { cat "$DIR/${PROMPT[$s]}"; printf '\n'; [ -f "$DIR/autonomy.txt" ] && cat "$DIR/autonomy.txt"; printf '\n'
     [ -f "$DIR/where-$s.txt" ] && cat "$DIR/where-$s.txt"; printf '\n%s\n' \
-"You are a replacement for a session of this agent that $why at $(date -u +%FT%TZ). Do not start over. If you use the phased-delivery skill, follow its references/resume.md: find your run with git worktree list --porcelain and the run file in each worktree's git dir under phased-delivery/run.md, check git status and log against it, and keep working in that same worktree. Read your handoff's session log. Tell me in two lines where you resume and what was uncommitted. Decisions recorded in the run file or the handoff still hold; questions still open there stay open."; } > "$f"
+"You are a replacement for a session of this agent that $why at $(date -u +%FT%TZ). Do not start over. If you use the phased-delivery skill, follow its references/resume.md: find your run with git worktree list --porcelain and the run file in each worktree's git dir under phased-delivery/run.md, check git status and log against it, and keep working in that same worktree. Read your handoff's session log. Tell me in two lines where you resume and what was uncommitted. Decisions recorded in the run file or the handoff still hold; questions still open there stay open."; } > "$f" )
   if ! launch "$s" "$cwd" "$n" "$f"; then
     log "$s REPLACE FAILED for pid ${pid:-none}: $LAUNCH_ERR (prompt NOT pasted: $f)"; return 1; fi
   log "$s REPLACED pid ${pid:-none} with \"$n\" in $cwd (${3:-hung})"; }

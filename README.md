@@ -99,3 +99,15 @@ Switching between local and remote is only `fleet.conf`: set `REMOTE_SSH` (and `
 ### The fleet's own tmux server
 
 Each fleet runs on its own tmux server, `tmux -L fleet-<FLEET>`, started without your tmux config. Hooks in your config (for example ones that add sidebar panes to every new window) would otherwise put the watchdog on the wrong pane. So `tmux ls` and `tmux attach` do not show the agents. Use `fleet attach <agent>`, or `tmux -L fleet-<FLEET> attach -t <agent>`. `fleet attach --read-only <agent>` attaches with `tmux attach -f read-only,ignore-size`: keys other than detach are dropped and the agent window keeps its size, which suits viewers such as a web console. Set `FLEET_TMUX_SOCKET=` (empty) in `fleet.conf` to use your default tmux server instead.
+
+### Per-agent folder and arguments
+
+`AGENT_CWD` and `CLAUDE_ARGS` apply to every agent. To give one agent its own folder or Claude arguments, define `agent_overrides` in `fleet.conf`. The watchdog calls it with the session name before each start and each replacement, in a subshell, so the values do not leak to the next agent:
+
+```bash
+agent_overrides() { case "$1" in
+  agent-b) AGENT_CWD=/home/me/src/other; CLAUDE_ARGS="--dangerously-skip-permissions --model haiku" ;;
+esac; }
+```
+
+`agent_overrides` must print nothing and have no side effects: the watchdog calls it more than once per launch and captures its output. It applies to Claude agents; with `AGENT_KIND=dsh` only `AGENT_CWD` is used (`DSH_ARGS` stays fleet-wide). `fleet handoff` notes when it is defined. Trust each folder once, as for `AGENT_CWD`. Start and replacement prompt copies (`start-<agent>.txt`, `replace-<agent>.txt`) are recreated on every write, readable by the owner only.
