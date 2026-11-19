@@ -175,13 +175,15 @@ launch() { local s=$1 cwd=$2 n=$3 f=$4 pane ok=0 scr
 
 # Per-agent values: fleet.conf may define agent_overrides, called with the session name, to set
 # AGENT_CWD and CLAUDE_ARGS for that agent only. It runs in a subshell, so nothing leaks to the next agent.
+# It must print nothing: its output would become part of the folder or the typed command.
 agent_cwd() { ( declare -F agent_overrides >/dev/null && agent_overrides "$1"; printf '%s' "${AGENT_CWD:-$HOME}" ); }
 agent_args() { ( declare -F agent_overrides >/dev/null && agent_overrides "$1"; printf '%s' "${CLAUDE_ARGS:-}" ); }
 
 # First start of an agent: its prompt file plus autonomy.txt. Prompt copies are private (umask 077).
 start_agent() { local s=$1 f=$DIR/start-$1.txt cwd
   cwd=$(agent_cwd "$s")
-  ( umask 077; { cat "$DIR/${PROMPT[$s]}"; printf '\n'; [ -f "$DIR/autonomy.txt" ] && cat "$DIR/autonomy.txt"; } > "$f" )
+  # rm first: an older watchdog may have left the copy readable by others, and umask applies only on create.
+  ( umask 077; rm -f "$f"; { cat "$DIR/${PROMPT[$s]}"; printf '\n'; [ -f "$DIR/autonomy.txt" ] && cat "$DIR/autonomy.txt"; } > "$f" )
   if ! launch "$s" "$cwd" "${NAME[$s]}" "$f"; then
     log "$s START FAILED: $LAUNCH_ERR (prompt NOT pasted: $f)"; return 1; fi
   log "$s STARTED \"${NAME[$s]}\" in $cwd"; }
@@ -194,7 +196,7 @@ replace() { local s=$1 pid=$2 why="hung and was stopped by the watchdog" cwd
   [ -n "$pid" ] && kill "$pid" 2>/dev/null; sleep 5; [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
   REPL[$s]=$(( ${REPL[$s]:-0} + 1 )); printf '%s\n' "${REPL[$s]}" > "$DIR/.repl-$s"
   local n="${NAME[$s]} (replacement ${REPL[$s]})" f=$DIR/replace-$s.txt
-  ( umask 077; { cat "$DIR/${PROMPT[$s]}"; printf '\n'; [ -f "$DIR/autonomy.txt" ] && cat "$DIR/autonomy.txt"; printf '\n'
+  ( umask 077; rm -f "$f"; { cat "$DIR/${PROMPT[$s]}"; printf '\n'; [ -f "$DIR/autonomy.txt" ] && cat "$DIR/autonomy.txt"; printf '\n'
     [ -f "$DIR/where-$s.txt" ] && cat "$DIR/where-$s.txt"; printf '\n%s\n' \
 "You are a replacement for a session of this agent that $why at $(date -u +%FT%TZ). Do not start over. If you use the phased-delivery skill, follow its references/resume.md: find your run with git worktree list --porcelain and the run file in each worktree's git dir under phased-delivery/run.md, check git status and log against it, and keep working in that same worktree. Read your handoff's session log. Tell me in two lines where you resume and what was uncommitted. Decisions recorded in the run file or the handoff still hold; questions still open there stay open."; } > "$f" )
   if ! launch "$s" "$cwd" "$n" "$f"; then

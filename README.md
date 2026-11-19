@@ -110,4 +110,4 @@ agent_overrides() { case "$1" in
 esac; }
 ```
 
-Trust each folder once, as for `AGENT_CWD`. Start and replacement prompt copies (`start-<agent>.txt`, `replace-<agent>.txt`) are written readable by the owner only.
+`agent_overrides` must print nothing and have no side effects: the watchdog calls it more than once per launch and captures its output. It applies to Claude agents; with `AGENT_KIND=dsh` only `AGENT_CWD` is used (`DSH_ARGS` stays fleet-wide). `fleet handoff` notes when it is defined. Trust each folder once, as for `AGENT_CWD`. Start and replacement prompt copies (`start-<agent>.txt`, `replace-<agent>.txt`) are recreated on every write, readable by the owner only.

@@ -20,7 +20,7 @@ Advisors are earlier supervisor sessions that handed over. They answer questions
 ## 1. Set up a fleet (once per run)
 
 1. `fleet init <dir>` creates `fleet.conf`, `autonomy.txt`, `idle-nudge.txt`, `ctx-handoff.txt`, `agent.example.txt`. Use a dir outside any repo checkout, e.g. `~/Development/<project>/<fleet>-fleet/`.
-2. Fill in `fleet.conf`: host access (`REMOTE_SSH`, `REMOTE_USER`), `FLEET_DIR` on the host, `AGENT_CWD`, `END_AT`, and one `AGENTS` row per agent. Ask the owner for anything you cannot read from the environment. Do not guess host, user or end time.
+2. Fill in `fleet.conf`: host access (`REMOTE_SSH`, `REMOTE_USER`), `FLEET_DIR` on the host, `AGENT_CWD`, `END_AT`, and one `AGENTS` row per agent (an agent with its own folder or Claude arguments gets an `agent_overrides` branch, README "Per-agent folder and arguments"). Ask the owner for anything you cannot read from the environment. Do not guess host, user or end time.
 3. Write one prompt per agent from `agent.example.txt`: scope, docs to read, host facts you checked yourself, the phased-delivery repo profile, and the other agents' session names.
 4. Edit the hard-limit list in `autonomy.txt` with the owner. Never widen it on your own. That file is appended to every start and every replacement prompt.
 5. `fleet sync`, then `fleet watchdog dry` and read the output. Sync refuses when a host file was edited since the last sync: `fleet pull <file>` and merge, or `fleet sync --force`. Every agent should show state=dead or missing (nothing started yet) and the output should have no bash errors.
