@@ -19,7 +19,7 @@ agent_overrides() { case "\$1" in own) AGENT_CWD="$d/own dir"; CLAUDE_ARGS="--da
 EOF
 echo prompt > "$d/p.txt"
 # A copy left behind by an older watchdog, readable by others.
-echo old > "$d/replace-own.txt"; chmod 644 "$d/replace-own.txt"
+for f in start-own.txt replace-own.txt; do echo old > "$d/$f"; chmod 644 "$d/$f"; done
 # The inner shell is this script's own bash, so an old bash first on PATH cannot fail quietly.
 out=$(cd "$d" && umask 022 && "$BASH" -s <<'EOF'
 set -u
@@ -52,6 +52,6 @@ mapfile -t L < <(printf '%s\n' "$out" | grep -E '^(cwd |claude )')
 [ "${L[6]}" = "cwd $d/own dir" ] && [[ "${L[7]}" == *'--dangerously-skip-permissions --model haiku'* ]] && echo "PASS a context replacement whose old folder is gone keeps them" || { echo "FAIL own rotation: ${L[6]} | ${L[7]}"; fails=$((fails+1)); }
 [ "${L[8]}" = "cwd $d/default" ] && [[ "${L[9]}" == *'"Plain" --plain'* ]] && echo "PASS nothing leaks to the next agent" || { echo "FAIL plain after own: ${L[8]} | ${L[9]}"; fails=$((fails+1)); }
 want "shell AGENT_CWD=$d/default CLAUDE_ARGS=--plain umask=0022" "the sourcing shell keeps the fleet values and its umask"
-want "mode start-own.txt -rw-------" "start prompt copy is private"
+want "mode start-own.txt -rw-------" "start prompt copy is private even over an older 0644 copy"
 want "mode replace-own.txt -rw-------" "replacement prompt copy is private even over an older 0644 copy"
 echo "failures: $fails"; exit $(( fails > 0 ))
