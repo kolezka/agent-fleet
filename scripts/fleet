@@ -218,7 +218,7 @@ for s in "${SESSIONS[@]}"; do
   if tmux has-session -t "$s" 2>/dev/null; then pid=$(claude_pid "$s"); ctx=$(ctx_pct "$(screen "$s")" "$(agent_kind "$s")"); tm=present
   else pid=; ctx=; tm=missing; fi
   last=$(rg -F " $s " "$LOG" 2>/dev/null | tail -1)
-  printf -- '- `%s` "%s": tmux session %s, claude pid %s, context %s%%\n  - last watchdog line: `%s`\n' \
+  printf -- '- `%s` "%s": tmux session %s, agent pid %s, context %s%%\n  - last watchdog line: `%s`\n' \
     "$s" "${NAME[$s]}" "$tm" "${pid:-none}" "${ctx:-?}" "${last:-none}"
 done
 EOF

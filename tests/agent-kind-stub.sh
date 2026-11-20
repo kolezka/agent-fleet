@@ -47,6 +47,42 @@ echo "shell AGENT_KIND=$AGENT_KIND DSH_ARGS=$DSH_ARGS"
 cat calls
 EOF
 ) || { echo "inner shell failed (exit $?); run with bash 4 or newer"; exit 9; }
+# Mixed fleet the other way round: the fleet-wide kind is dsh and one agent is Claude Code.
+# A Claude dialog must still stop keys at every call site, and an unknown kind must not kill
+# the running agent before a replacement can launch.
+m=$d/mixed; mkdir -p "$m"; cp "$W" "$m/watchdog.sh"; echo hello > "$m/msg.txt"; echo nudge > "$m/idle-nudge.txt"; echo handoff > "$m/ctx-handoff.txt"
+cat > "$m/fleet.conf" <<EOF
+FLEET=x
+FLEET_DIR=$m
+AGENT_KIND=dsh
+AGENTS=("cc|Cc|p.txt" "bad|Bad|p.txt")
+agent_overrides() { case "\$1" in cc) AGENT_KIND=claude ;; bad) AGENT_KIND=codex ;; esac; }
+EOF
+echo prompt > "$m/p.txt"
+mixed=$(cd "$m" && "$BASH" -s <<'EOF'
+set -u
+. ./watchdog.sh || exit 9
+log() { echo "log: $*"; }; sleep() { :; }; kill() { echo "kill $*"; }
+pgrep() { echo 77; }
+SCR='Do you want to proceed?
+❯ 1. Yes'
+screen() { printf '%s\n' "$SCR"; }
+tmux() { case "$1" in
+  list-panes) echo 500;;
+  capture-pane) printf '%s\n' "$SCR";;
+  load-buffer|paste-buffer) echo "tmux $1";;
+  *) return 0;; esac; }
+check cc
+paste_file cc msg.txt 2>&1; echo "rc-paste $?"
+# The dialog's "❯ 1. Yes" line reads as typing; take that check out so the dialog gate decides.
+user_typing() { return 1; }
+idle_nudge cc
+SCR='Ctx 960k/1.0M (96%)'; STATE[cc]=waiting; CTX_MAX=90
+ctx_rotate cc 77 "$SCR"; echo "rc-rot $?"
+replace bad 4242; echo "rc-replace $?"
+EOF
+) || { echo "mixed inner shell failed (exit $?)"; exit 9; }
+out=$out$'\n'$mixed
 echo "$out"; fails=0
 want() { if printf '%s\n' "$out" | grep -qF -- "$1"; then echo "PASS $2"; else echo "FAIL $2 (missing: $1)"; fails=$((fails+1)); fi; }
 # Enter is typed too ("typed: " plus a carriage return); only command lines count.
@@ -64,4 +100,12 @@ want "dialog-deep=none" "dialog text on a dsh agent is output"
 want "ctx-deep=42" "dsh context line is read for the dsh agent"
 want "ctx-plain=30" "claude context line is read for the claude agent"
 want "shell AGENT_KIND=claude DSH_ARGS=--fleet-wide" "the sourcing shell keeps the fleet values"
+want "log: cc state=dialog kind=other" "check sees a Claude dialog in a dsh fleet"
+want "cc: dialog open, not sent" "paste_file refuses keys on a Claude dialog in a dsh fleet"
+want "rc-paste 3" "paste_file returns 3 on that dialog"
+want "log: cc dialog open, no nudge" "idle nudge skips a Claude dialog in a dsh fleet"
+want "log: cc CTXROTATE asked for handoff at 96%" "context rotation reads the Claude context line in a dsh fleet"
+want "(nothing stopped)" "replace with an unknown kind stops nothing"
+if printf '%s\n' "$mixed" | grep -q '^kill '; then echo "FAIL replace killed a process for an unknown kind"; fails=$((fails+1)); else echo "PASS no kill for an unknown kind"; fi
+if printf '%s\n' "$mixed" | sed -n '/^log: cc state=dialog/,/^rc-paste/p' | grep -q '^tmux \(load\|paste\)-buffer'; then echo "FAIL keys were pasted while the dialog was open"; fails=$((fails+1)); else echo "PASS nothing pasted while the dialog was open"; fi
 echo "failures: $fails"; exit $(( fails > 0 ))

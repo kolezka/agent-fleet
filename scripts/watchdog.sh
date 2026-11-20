@@ -195,6 +195,8 @@ start_agent() { local s=$1 f=$DIR/start-$1.txt cwd
 replace() { local s=$1 pid=$2 why="hung and was stopped by the watchdog" cwd
   [ "${3:-}" = context ] && why="was retired by the watchdog because its context window was nearly full, after it confirmed its run file and handoff are current"
   cwd=$(agent_cwd "$s")
+  # An unknown per-agent kind would fail the launch after the old process is gone; keep that one running.
+  case "$(agent_kind "$s")" in claude|dsh) ;; *) log "$s REPLACE FAILED for pid ${pid:-none}: AGENT_KIND must be claude or dsh, got $(agent_kind "$s") (nothing stopped)"; return 1;; esac
   if [ -n "$pid" ]; then local c; c=$(pid_cwd "$pid"); [ -d "$c" ] && cwd=$c; fi
   [ "$DRY" = 1 ] && { log "$s DRY would kill pid ${pid:-none} and start a replacement in $cwd"; return; }
   [ -n "$pid" ] && kill "$pid" 2>/dev/null; sleep 5; [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
