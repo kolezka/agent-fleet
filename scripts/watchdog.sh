@@ -39,14 +39,15 @@ TICK=0; LOWDISK_AT=0
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$LOG"; [ "$ONCE" = 1 ] && printf '%s\n' "$*"; return 0; }
 
 claude_pid() { # newest agent process (claude, or dsh-agent.mjs) in the session's panes
-  local pp re='^claude '; [ "$AGENT_KIND" = dsh ] && re='dsh-agent\.mjs( |$)'
+  local pp re='^claude '; [ "$(agent_kind "$1")" = dsh ] && re='dsh-agent\.mjs( |$)'
   for pp in $(tmux list-panes -s -t "$1" -F '#{pane_pid}' 2>/dev/null); do
     pgrep -P "$pp" -f "$re" ; done | tail -1; }
 tool_running() { # a shell or build under the agent that is not an MCP server
   # pgrep -P plus ps -p works on Linux and macOS (macOS ps has no --ppid).
   local kids d p=$1
   # dsh-agent.mjs runs one dsh process per message; the tools are that process's children.
-  if [ "$AGENT_KIND" = dsh ]; then p=$(pgrep -P "$1" | paste -sd, -); [ -n "$p" ] || return 1; fi
+  # $2 is the agent's kind; without it the fleet-wide AGENT_KIND applies.
+  if [ "${2:-$AGENT_KIND}" = dsh ]; then p=$(pgrep -P "$1" | paste -sd, -); [ -n "$p" ] || return 1; fi
   kids=$(pgrep -P "$p" | paste -sd, -); [ -n "$kids" ] || return 1
   d=$(ps -o pid=,args= -p "$kids" 2>/dev/null | rg -v "${TOOL_IGNORE:-mcp|codegraph serve|hindsight|npm exec|npx -y|caffeinate|dsh-ptc-runtime}") || return 1
   [ -n "$d" ]; }
@@ -63,10 +64,10 @@ working_line() { rg -m1 '…\s\((\d+h\s)?(\d+m\s)?\d+s' <<<"$1"; }
 signature() { rg -v 'Reset:|Cost:|No credentials|t/s|^\s*$' <<<"$1" \
   | sed -E 's/\((([0-9]+h )?([0-9]+m )?[0-9]+s)( ·|\))/(T\4/' | cksum | cut -d' ' -f1; }
 
-dialog_kind() { # prints trust|protected|other when a dialog is open
+dialog_kind() { # prints trust|protected|other when a dialog is open; $2 is the agent's kind
   local scr=$1
   # dsh-agent.mjs has no dialogs (headless DSH fails closed), so dialog text there is agent output.
-  [ "$AGENT_KIND" = dsh ] && return 1
+  [ "${2:-$AGENT_KIND}" = dsh ] && return 1
   # Workspace trust is the owner's call and "deny" would pick "No, exit", so it gets its own kind.
   rg -q 'Is this a project you created or one you trust|Yes, I trust this folder' <<<"$scr" && { echo trust; return 0; }
   rg -q 'Do you want to proceed\?|❯ 1\. Yes' <<<"$scr" || return 1
@@ -74,7 +75,7 @@ dialog_kind() { # prints trust|protected|other when a dialog is open
 deny_dialog() { local s=$1 k=$2
   [ "$DRY" = 1 ] && { log "$s DRY would deny $k dialog"; return; }
   keys "$s" 2; sleep 2
-  dialog_kind "$(screen "$s")" >/dev/null && keys "$s" $'\e'
+  dialog_kind "$(screen "$s")" "$(agent_kind "$s")" >/dev/null && keys "$s" $'\e'
   log "$s DENIED $k permission dialog (hard limit or unattended)"; }
 
 input_text() { # the text in the input line; empty when it is empty or shows a dim suggestion
@@ -102,7 +103,7 @@ paste_file() { local s=$1 f=$2 probe before _
   # from our own paste, and Enter on a dialog can approve it. Such messages are refused.
   rg -q -- "$DIALOG_TEXT" "$f" && { echo "$s: message quotes permission or trust dialog text, not sent (reword it)" >&2; return 8; }
   tmux has-session -t "$s" 2>/dev/null || { echo "no session $s" >&2; return 2; }
-  dialog_kind "$(screen "$s")" >/dev/null && { echo "$s: dialog open, not sent" >&2; return 3; }
+  dialog_kind "$(screen "$s")" "$(agent_kind "$s")" >/dev/null && { echo "$s: dialog open, not sent" >&2; return 3; }
   user_typing "$s" && { echo "$s: text in the input line, not sent" >&2; return 4; }
   # Old scrollback may already hold the same line, so delivery means the count goes up.
   before=$(probe_count "$s" "$probe") || { echo "$s: tmux could not read the pane, not sent" >&2; return 7; }
@@ -111,7 +112,7 @@ paste_file() { local s=$1 f=$2 probe before _
   sleep 1
   # Re-check right before Enter. The message holds no dialog text, so any dialog text now is a real dialog.
   local txt first
-  if dialog_kind "$(screen "$s")" >/dev/null; then
+  if dialog_kind "$(screen "$s")" "$(agent_kind "$s")" >/dev/null; then
     # Keys now would go to the dialog, so none are sent.
     echo "$s: a dialog opened during the paste, Enter not pressed. The pasted text may still be in the input line." >&2; return 3; fi
   txt=$(input_text "$s")
@@ -134,7 +135,7 @@ paste_file() { local s=$1 f=$2 probe before _
 
 idle_nudge() { local s=$1
   user_typing "$s" && { log "$s idle but user is typing, no nudge"; return; }
-  dialog_kind "$(screen "$s")" >/dev/null && { log "$s dialog open, no nudge"; return; }
+  dialog_kind "$(screen "$s")" "$(agent_kind "$s")" >/dev/null && { log "$s dialog open, no nudge"; return; }
   [ "$DRY" = 1 ] && { log "$s DRY would send idle nudge"; return; }
   tmux load-buffer -b in "$DIR/idle-nudge.txt" && tmux paste-buffer -p -d -b in -t "$s"; sleep 1; keys "$s" $'\r'
   log "$s idle nudge sent"; }
@@ -150,34 +151,37 @@ nudge() { local s=$1
 # All keys go to the new pane by id, never to whatever pane happens to be active.
 # On failure LAUNCH_ERR says why and the new pane is closed (its claude, if any, ends unanswered),
 # so a retry is not skipped as "already running".
-launch() { local s=$1 cwd=$2 n=$3 f=$4 pane ok=0 scr
-  LAUNCH_ERR=
+launch() { local s=$1 cwd=$2 n=$3 f=$4 pane ok=0 scr kind
+  LAUNCH_ERR=; kind=$(agent_kind "$s")
+  case "$kind" in claude|dsh) ;; *) LAUNCH_ERR="AGENT_KIND for $s must be claude or dsh, got $kind"; return 2;; esac
   if tmux has-session -t "$s" 2>/dev/null; then pane=$(tmux new-window -P -F '#{pane_id}' -t "$s" -c "$cwd" -n "agent-$(date +%H%M%S)")
   else pane=$(tmux new-session -d -P -F '#{pane_id}' -s "$s" -x 200 -y 50 -c "$cwd"); fi
   [ -n "$pane" ] || { LAUNCH_ERR="tmux could not create a window for $s"; return 4; }
   launch_fail() { LAUNCH_ERR=$1; tmux kill-pane -t "$pane" 2>/dev/null; return "$2"; }
   local cmd ready='bypass permissions on|for shortcuts'
-  if [ "$AGENT_KIND" = dsh ]; then ready='dsh-agent ready'
+  if [ "$kind" = dsh ]; then ready='dsh-agent ready'
     # DSH_ARGS is split like CLAUDE_ARGS: the shell in the pane parses it.
-    cmd="${NODE_BIN:-node} $(printf %q "$DIR/dsh-agent.mjs") --name $(printf %q "$n") --dsh $(printf %q "${DSH_BIN:-dsh}") --context-tokens $(printf %q "${DSH_CONTEXT_TOKENS:-1000000}") -- ${DSH_ARGS:-}"
+    cmd="${NODE_BIN:-node} $(printf %q "$DIR/dsh-agent.mjs") --name $(printf %q "$n") --dsh $(printf %q "${DSH_BIN:-dsh}") --context-tokens $(printf %q "${DSH_CONTEXT_TOKENS:-1000000}") -- $(agent_dsh_args "$s")"
   else cmd="${CLAUDE_BIN:-claude} -n \"$n\" $(agent_args "$s")"; fi
-  keys "$pane" "$cmd"$'\r' || { launch_fail "tmux could not type the $AGENT_KIND command" 4; return; }
+  keys "$pane" "$cmd"$'\r' || { launch_fail "tmux could not type the $kind command" 4; return; }
   # Paste only once the agent's UI is up. A shell prompt (starship uses ❯ too) would run the text.
   for _ in $(seq 1 45); do sleep 2; scr=$(screen "$pane")
-    if [ "$(dialog_kind "$scr")" = trust ]; then
+    if [ "$(dialog_kind "$scr" "$kind")" = trust ]; then
       launch_fail "workspace trust dialog: open claude once in $cwd by hand and trust it" 2; return; fi
     [ -n "$(claude_pid "$s")" ] && rg -q "$ready" <<<"$scr" && { ok=1; break; }; done
-  [ "$ok" = 1 ] || { launch_fail "$AGENT_KIND UI not detected after 90 s" 1; return; }
+  [ "$ok" = 1 ] || { launch_fail "$kind UI not detected after 90 s" 1; return; }
   sleep 2
   # A claude without its prompt is closed too, so a retry starts it cleanly.
   tmux load-buffer -b wd "$f" && tmux paste-buffer -p -d -b wd -t "$pane" || { launch_fail "tmux could not paste $f" 3; return; }
   sleep 2; keys "$pane" $'\r' || { launch_fail "tmux could not press Enter" 3; return; }; }
 
 # Per-agent values: fleet.conf may define agent_overrides, called with the session name, to set
-# AGENT_CWD and CLAUDE_ARGS for that agent only. It runs in a subshell, so nothing leaks to the next agent.
-# It must print nothing: its output would become part of the folder or the typed command.
+# AGENT_CWD, CLAUDE_ARGS, AGENT_KIND and DSH_ARGS for that agent only. It runs in a subshell, so nothing
+# leaks to the next agent. It must print nothing: its output would become part of the folder or the typed command.
 agent_cwd() { ( declare -F agent_overrides >/dev/null && agent_overrides "$1"; printf '%s' "${AGENT_CWD:-$HOME}" ); }
 agent_args() { ( declare -F agent_overrides >/dev/null && agent_overrides "$1"; printf '%s' "${CLAUDE_ARGS:-}" ); }
+agent_kind() { ( declare -F agent_overrides >/dev/null && agent_overrides "$1"; printf '%s' "${AGENT_KIND:-claude}" ); }
+agent_dsh_args() { ( declare -F agent_overrides >/dev/null && agent_overrides "$1"; printf '%s' "${DSH_ARGS:-}" ); }
 
 # First start of an agent: its prompt file plus autonomy.txt. Prompt copies are private (umask 077).
 start_agent() { local s=$1 f=$DIR/start-$1.txt cwd
@@ -205,7 +209,7 @@ replace() { local s=$1 pid=$2 why="hung and was stopped by the watchdog" cwd
 
 # Context rotation: at CTX_MAX % ask the lead to save state and answer
 # CONTEXT-HANDOFF-READY; only then replace it, so its workers are not killed mid-step.
-ctx_pct() { local re='/1\.0M\W*\((\d+)%\)'; [ "$AGENT_KIND" = dsh ] && re='dsh context \((\d+)%\)'
+ctx_pct() { local re='/1\.0M\W*\((\d+)%\)'; [ "${2:-$AGENT_KIND}" = dsh ] && re='dsh context \((\d+)%\)'
   rg -o "$re" -r '$1' <<<"$1" | tail -1; }
 ctx_rotate() { local s=$1 pid=$2 scr=$3 p
   [ -n "$pid" ] || return 1
@@ -213,16 +217,17 @@ ctx_rotate() { local s=$1 pid=$2 scr=$3 p
     [ "${STATE[$s]}" = waiting ] && rg -q '^●\W*CONTEXT-HANDOFF-READY\W*$' <<<"$scr" || return 1
     [ "$DRY" = 1 ] && { log "$s DRY would rotate for context"; return 0; }
     replace "$s" "$pid" context; ROT[$s]=; return 0; fi
-  p=$(ctx_pct "$scr"); [ -n "$p" ] && [ "$p" -ge "$CTX_MAX" ] || return 1
-  if user_typing "$s" || dialog_kind "$scr" >/dev/null; then return 1; fi
+  p=$(ctx_pct "$scr" "$(agent_kind "$s")"); [ -n "$p" ] && [ "$p" -ge "$CTX_MAX" ] || return 1
+  if user_typing "$s" || dialog_kind "$scr" "$(agent_kind "$s")" >/dev/null; then return 1; fi
   [ "$DRY" = 1 ] && { log "$s DRY would ask for context handoff at ${p}%"; return 1; }
   tmux load-buffer -b cx "$DIR/ctx-handoff.txt" && tmux paste-buffer -p -d -b cx -t "$s"; sleep 1; keys "$s" $'\r'
   ROT[$s]=$(date +%s); log "$s CTXROTATE asked for handoff at ${p}%"; return 1; }
 
-check() { local s=$1 pid scr wl sig limit dk now
+check() { local s=$1 pid scr wl sig limit dk now kind
+  kind=$(agent_kind "$s")
   tmux has-session -t "$s" 2>/dev/null || { log "$s tmux session missing, recreating"; replace "$s" ""; return; }
   pid=$(claude_pid "$s"); scr=$(screen "$s"); wl=$(working_line "$scr"); sig=$(signature "$scr")
-  dk=$(dialog_kind "$scr")
+  dk=$(dialog_kind "$scr" "$kind")
   if [ -n "$pid" ] && [ -n "$dk" ]; then
     DIALOG[$s]=$(( ${DIALOG[$s]:-0} + 1 )); STRIKE[$s]=0
     log "$s state=dialog kind=$dk count=${DIALOG[$s]} pid=$pid"
@@ -233,7 +238,7 @@ check() { local s=$1 pid scr wl sig limit dk now
   DIALOG[$s]=0
   if [ -z "$pid" ]; then STATE[$s]=dead
   elif [ -n "$wl" ]; then
-    if tool_running "$pid"; then STATE[$s]=tool
+    if tool_running "$pid" "$kind"; then STATE[$s]=tool
     elif [ "$sig" = "${SIG[$s]:-}" ]; then STATE[$s]=stalled
     else STATE[$s]=working; fi
   else STATE[$s]=waiting; fi
@@ -254,7 +259,7 @@ check() { local s=$1 pid scr wl sig limit dk now
   else WAIT[$s]=0; fi
   # dsh-agent.mjs marks an open model step "thinking" and an open tool call "tool": the screen can hold still there.
   limit=3; [[ "$wl" == *thinking* || "$wl" == *' · tool · '* ]] && limit=10
-  log "$s state=${STATE[$s]} strike=${STRIKE[$s]}/$limit pid=${pid:-none} ctx=$(ctx_pct "$scr")%"
+  log "$s state=${STATE[$s]} strike=${STRIKE[$s]}/$limit pid=${pid:-none} ctx=$(ctx_pct "$scr" "$kind")%"
   ctx_rotate "$s" "$pid" "$scr" && return
   if [ "${STRIKE[$s]}" -ge "$limit" ]; then
     if [ "${STATE[$s]}" = stalled ] && [ "${NUDGED[$s]:-0}" = 0 ]; then nudge "$s"; NUDGED[$s]=1; STRIKE[$s]=0
@@ -272,7 +277,7 @@ while :; do
     if [ "${avail:-999}" -lt "${DISK_MIN_G:-40}" ] && [ $(( $(date +%s) - LOWDISK_AT )) -ge 21600 ] && [ "$DRY" = 0 ]; then
       LOWDISK_AT=$(date +%s); log "LOWDISK ${avail}G, asking agents to clean up"
       for s in "${SESSIONS[@]}"; do
-        dialog_kind "$(screen "$s")" >/dev/null || user_typing "$s" || { keys "$s" "Watchdog: only ${avail}G free on ${DISK_PATH:-/}. When your current step ends, stop emulators and dev servers you do not need and delete build output and worktrees you no longer need, then continue."; sleep 1; keys "$s" $'\r'; }
+        dialog_kind "$(screen "$s")" "$(agent_kind "$s")" >/dev/null || user_typing "$s" || { keys "$s" "Watchdog: only ${avail}G free on ${DISK_PATH:-/}. When your current step ends, stop emulators and dev servers you do not need and delete build output and worktrees you no longer need, then continue."; sleep 1; keys "$s" $'\r'; }
       done
     fi
   fi
