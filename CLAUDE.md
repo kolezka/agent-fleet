@@ -30,6 +30,7 @@ shellcheck -S warning scripts/fleet scripts/watchdog.sh scripts/smoke-test.sh sc
 scripts/test-local.sh   # local checks with a stub ssh and a private tmux server, must exit 0
 tests/dsh-agent-stub.sh # AGENT_KIND=dsh with a stub dsh, must exit 0
 tests/agent-overrides-stub.sh # per-agent folder and arguments, private prompt copies, must exit 0
+tests/agent-kind-stub.sh # per-agent AGENT_KIND and DSH_ARGS, must exit 0
 node --check scripts/dsh-agent.mjs
 jq . .claude-plugin/*.json >/dev/null
 rg -n '\x{2013}|\x{2014}' .   # must find nothing: no en or em dashes anywhere

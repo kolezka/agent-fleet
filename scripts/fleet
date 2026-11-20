@@ -209,16 +209,16 @@ handoff_md() { local t
   echo "- Fleet: \`$FLEET\`, fleet dir on the host: \`$FLEET_DIR\`, local fleet dir: \`$LOCAL_DIR\`"
   echo "- Host access: REMOTE_SSH \`${REMOTE_SSH:-(local)}\`, REMOTE_USER \`${REMOTE_USER:-(none)}\`"
   echo "- AGENT_KIND \`${AGENT_KIND:-claude}\`, DSH_ARGS \`${DSH_ARGS:-}\`"
-  declare -F agent_overrides >/dev/null && echo "- fleet.conf defines \`agent_overrides\`: some agents run in their own folder or with their own CLAUDE_ARGS (see fleet.conf)"
+  declare -F agent_overrides >/dev/null && echo "- fleet.conf defines \`agent_overrides\`: some agents run in their own folder, with their own CLAUDE_ARGS, or as another AGENT_KIND with their own DSH_ARGS (see fleet.conf)"
   echo "- AGENT_CWD \`${AGENT_CWD:-}\`, CLAUDE_CONFIG_DIR \`${CLAUDE_CONFIG_DIR:-(default)}\`, CLAUDE_ARGS \`${CLAUDE_ARGS:-}\`"
   echo "- END_AT \`${END_AT:-}\`, CTX_MAX \`${CTX_MAX:-85}\`, DISK_PATH \`${DISK_PATH:-/}\`, DISK_MIN_G \`${DISK_MIN_G:-40}\`"
   echo; echo "Agents (live, checked $(date -u +%FT%TZ)):"; echo
   cat <<'EOF' | rx_helpers
 for s in "${SESSIONS[@]}"; do
-  if tmux has-session -t "$s" 2>/dev/null; then pid=$(claude_pid "$s"); ctx=$(ctx_pct "$(screen "$s")"); tm=present
+  if tmux has-session -t "$s" 2>/dev/null; then pid=$(claude_pid "$s"); ctx=$(ctx_pct "$(screen "$s")" "$(agent_kind "$s")"); tm=present
   else pid=; ctx=; tm=missing; fi
   last=$(rg -F " $s " "$LOG" 2>/dev/null | tail -1)
-  printf -- '- `%s` "%s": tmux session %s, claude pid %s, context %s%%\n  - last watchdog line: `%s`\n' \
+  printf -- '- `%s` "%s": tmux session %s, agent pid %s, context %s%%\n  - last watchdog line: `%s`\n' \
     "$s" "${NAME[$s]}" "$tm" "${pid:-none}" "${ctx:-?}" "${last:-none}"
 done
 EOF
@@ -345,7 +345,7 @@ tmux ls 2>/dev/null | rg -F -f <(printf '%s\n' "${SESSIONS[@]}" "$FLEET-watchdog
 echo "--- last state per agent (watchdog.log)"
 for s in "${SESSIONS[@]}"; do rg -F " $s " "$LOG" 2>/dev/null | tail -1 || echo "$s: no log lines"; done
 echo "--- context"
-for s in "${SESSIONS[@]}"; do p=$(ctx_pct "$(screen "$s")"); echo "$s ctx=${p:-?}%"; done
+for s in "${SESSIONS[@]}"; do p=$(ctx_pct "$(screen "$s")" "$(agent_kind "$s")"); echo "$s ctx=${p:-?}%"; done
 EOF
     ;;
   screen)
