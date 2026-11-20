@@ -80,6 +80,11 @@ idle_nudge cc
 SCR='Ctx 960k/1.0M (96%)'; STATE[cc]=waiting; CTX_MAX=90
 ctx_rotate cc 77 "$SCR"; echo "rc-rot $?"
 replace bad 4242; echo "rc-replace $?"
+# A dialog that opens during the paste: the first screen is clean, the second shows it.
+# screen runs in a command substitution, so the read count lives in a file.
+: > reads; screen() { echo x >> reads; if [ "$(wc -l < reads)" -le 1 ]; then echo idle; else printf '%s\n' 'Do you want to proceed?' '❯ 1. Yes'; fi; }
+probe_count() { echo 0; }; keys() { echo "keys $(printf '%q' "$2")"; }
+paste_file cc msg.txt 2>&1; echo "rc-paste2 $?"
 EOF
 ) || { echo "mixed inner shell failed (exit $?)"; exit 9; }
 out=$out$'\n'$mixed
@@ -108,4 +113,7 @@ want "log: cc CTXROTATE asked for handoff at 96%" "context rotation reads the Cl
 want "(nothing stopped)" "replace with an unknown kind stops nothing"
 if printf '%s\n' "$mixed" | grep -q '^kill '; then echo "FAIL replace killed a process for an unknown kind"; fails=$((fails+1)); else echo "PASS no kill for an unknown kind"; fi
 if printf '%s\n' "$mixed" | sed -n '/^log: cc state=dialog/,/^rc-paste/p' | grep -q '^tmux \(load\|paste\)-buffer'; then echo "FAIL keys were pasted while the dialog was open"; fails=$((fails+1)); else echo "PASS nothing pasted while the dialog was open"; fi
+want "cc: a dialog opened during the paste, Enter not pressed" "paste_file stops before Enter when a Claude dialog opens during the paste"
+want "rc-paste2 3" "paste_file returns 3 for a dialog that opened during the paste"
+if printf '%s\n' "$mixed" | sed -n '/^rc-replace/,/^rc-paste2/p' | grep -qxF "keys \$'\\r'"; then echo "FAIL Enter pressed on a dialog that opened during the paste"; fails=$((fails+1)); else echo "PASS no Enter on a dialog that opened during the paste"; fi
 echo "failures: $fails"; exit $(( fails > 0 ))
